@@ -1,97 +1,124 @@
-# Market structure — Phase 0 ground truth (verified live 2026-07-13 ~07:00Z)
+# Kalshi weather markets — verified facts
 
-## Live-fire lessons (first armed session, 2026-07-14 00:12–06:45 PT)
+Everything here was verified against the live API or Kalshi's own docs on
+2026-07-15. Trust this file over any prior assumption. Re-verify before changing
+anything API-adjacent.
 
-1. **Intraday vol seasonality is NOT optional.** Uniform √time scaling of daily
-   implied variance overpriced quiet-hour tails ~2-4x in probability (model 45%
-   avg P(win) on fills vs 15% realized; 5-15c bucket 21%→4%). 90d hourly perp data:
-   07-11Z carries ~0.6x average variance, the 13Z US-data hour ~3.5x. Fixed via
-   `engine/vol_profile.py` seasonal-time scaling. Near-money contracts (15c+) were
-   *profitable* through the same night — the core engine is sound.
-2. **Kalshi pauses crypto markets around macro prints.** CPI minute -> 26x
-   `400 Bad Request` on order placement. Always log 4xx bodies; never let one
-   rejected order abort the cycle; `cancel_order_on_pause: true`.
-   Cancel is V2-only too: `DELETE /portfolio/events/orders/{order_id}` — the legacy
-   `DELETE /portfolio/orders/{id}` returns `410 deprecated_v1_order_endpoint`
-   (found live 2026-07-15 when the first maker cancels failed for 10 minutes).
-3. **Rate budget is shared and bursty lookups 429.** Batch + space + backoff;
-   POSTs retry only on 429 (a 500 may have executed — double-fill risk).
-4. **Daily-loss rail must count desk-placed tickers only** — a manual trade
-   settling the same UTC day masked −$6.70 of desk losses.
-5. **Same-event strikes/sides are one correlated bet** — cap cost per event.
-6. The former night replay is retired as evidence: it was partly in-sample,
-   excluded unreconstructable contracts, and lacked the original option surfaces.
-7. **Risk-neutral width is not physical probability.** R4 rejects a settlement when
-   the model/market IQR ratio is outside `[2/3, 1.5]` and sizes the complete
-   co-settling payoff rather than treating contracts as independent bets.
+## Series & structure
 
-## Tradeable series (all settle on 60s average of CF Benchmarks RTI; `settlement_timer_seconds: 60`)
+- One series per city. We trade **KXHIGHNY** only (NYC daily high).
+- **Settlement**: "the highest temperature recorded in **Central Park, New York**
+  ... as reported by the **National Weather Service's Climatological Report
+  (Daily)**". An **integer °F**, on the **local calendar day**. Hence the model
+  works in reported-integer space with a 0.5 continuity correction, and every
+  forecast must be aggregated on `America/New_York`, not UTC.
+- Events close ~04:59Z the following day; `expiration_time` is ~a week later.
 
-| Series | What | Structure | Strike spacing | Cadence |
-|---|---|---|---|---|
-| `KXBTCD` | BTC above/below | ladder of `strike_type: greater` binaries vs `floor_strike` | $100 | one event per hour (`KXBTCD-26JUL1304` = Jul 13, 04 EDT hour), opens ~1h before close |
-| `KXBTC`  | BTC range | `between` buckets + `less`/`greater` tails | ~$100 | hourly |
-| `KXETHD` | ETH above/below | same as KXBTCD | $10 (verify per event) | hourly |
-| `KXETH`  | ETH range | same as KXBTC | ~$10 | hourly |
+## The partition (the single most important structural fact)
 
-- Fair value of a `greater` contract = `P(settle > floor_strike)` = survival function at strike.
-- `between` bucket = `CDF(cap) − CDF(floor)`; `less` = `CDF(floor)`.
-- Settlement: simple average of 60 one-second BRTI (BTC) / ETH RTI prints in the final minute before the close hour. Expected expiration ~5 min after close.
-- Prices: 1¢ ticks (`price_level_structure: linear_cent`), fields are dollar-strings (`yes_bid_dollars`, `yes_ask_dollars`, `no_bid_dollars`, `no_ask_dollars`).
-- Old markets close each hour; scanner must re-enumerate open markets every cycle (don't hardcode tickers).
-- Liquidity is hour-dependent; overnight books can be empty. Depth check before sizing is mandatory.
+An event is an **exhaustive, mutually exclusive partition** of integer °F.
+Live KXHIGHNY-26JUL16:
 
-## Deribit alignment (verified)
+| ticker | strike_type | floor | cap | subtitle | pays on |
+|---|---|---|---|---|---|
+| T89 | less | – | 89 | "88° or below" | reported **< 89** |
+| B89.5 | between | 89 | 90 | "89° to 90°" | **89 ≤ x ≤ 90** |
+| B91.5 | between | 91 | 92 | "91° to 92°" | 91 ≤ x ≤ 92 |
+| B93.5 | between | 93 | 94 | "93° to 94°" | 93 ≤ x ≤ 94 |
+| B95.5 | between | 95 | 96 | "95° to 96°" | 95 ≤ x ≤ 96 |
+| T96 | greater | 96 | – | "97° or above" | reported **> 96** |
 
-- BTC: 874 live options, ETH: 696. Daily expiries at **08:00 UTC** exactly — matches the 4 AM EDT Kalshi settle to the second. All other hourly settles use total-variance interpolation between spot (t=0) and nearest expiry chain.
-- Index at check: BTC $62,762.78, ETH $1,778.54.
-- Basis caveat: Deribit's own index (deribit_price_index) ≠ CF Benchmarks RTI. Both are multi-exchange USD composites; expected basis small but must be logged (checks.py) and alarmed > 10bps.
+Exactly one leg pays → **probabilities sum to exactly 1**. Events carry
+`"mutually_exclusive": true`; 408 settled NY markets = 68 events = exactly 68
+`result:"yes"`.
 
-## Fees (best available; VERIFY against first real fills in Phase 3 shakeout)
+⚠️ **These semantics are NOT the crypto ones.** Crypto's continuous conventions
+were `floor < x <= cap` for `between` and `x <= cap` for `less`. On weather that
+misprices every `less` leg by a full degree and drops the bottom integer of every
+bracket. See `engine/weather._wins`.
 
-- Taker: `0.07 × p × (1−p)` per contract, order total rounded **up** to the next
-  $0.0001 (centicent). Peak 1.75¢/contract at p=0.50.
-- Maker: series API distinguishes `fee_type: quadratic` (our 4 series) vs `quadratic_with_maker_fees` (others). Strong signal our series charge **no maker fee**; one third-party source claims maker = 25% of taker universally.
-  → Config models maker at 25% of taker (conservative). If shakeout fills show $0 maker fees, set `MAKER_FEE_FRACTION = 0.0` and thresholds tighten for free.
-- `fee_multiplier: 1` on all four series (no crypto surcharge in API metadata).
+## Fees — identical to crypto, and maker is FREE
 
-## Audit addenda (verified live 2026-07-13)
+From the official Fee Schedule PDF (eff. 2026-07-07):
+- Taker: `round_up(M × 0.07 × C × P × (1−P))`, **M defaults to 1**.
+- Maker: `round_up(M × 0.0175 × C × P × (1−P))`, **M defaults to 0** — a maker fee
+  applies only to series in the "Non-Standard Fees" table. **No `KXHIGH*` series
+  appears there. No weather series appears at all.**
+- "**There is no settlement fee.**"
+- All **288** "Climate and Weather" series report `fee_type: quadratic,
+  fee_multiplier: 1` — zero exceptions, byte-identical to KXBTC.
+- ⚠️ Fee data lives **only on the series object**, never on `/markets`.
 
-- **Orderbook shape**: `/markets/{t}/orderbook` returns `{"orderbook_fp": {"yes_dollars": [["0.5500","5200.00"],...], "no_dollars": [...]}}` — resting BIDS per side as dollar/quantity STRING pairs, ascending price. There is no `orderbook.yes/no` cents form. Buying yes crosses the best no bid at `1 − price`.
-- **Batch lookup**: `/markets?tickers=a,b,c` works — use it for settlement checks; never paginate `status=settled` series history (grows unboundedly). Settled markets report `status: "finalized"`, `result: "yes"|"no"` (empty string while open).
-- **DST**: settles are defined at "4 AM **EDT**". In winter (EST) that's 09:00Z while Deribit expiries stay 08:00Z year-round. The code keys off the API `close_time` and `slice_for_settle` picks the next expiry ≥ settle, so it degrades gracefully to T_set/T_exp interpolation — do NOT "fix" the 08:00Z assumption.
-- **Forward basis**: densities must center on the forward interpolated to the *settle* time (`index × (F_exp/index)^(T_set/T_exp)`), never the raw daily-expiry forward — at 20% annualized basis the difference is ~4¢ of fake edge on hourly ATM contracts. Guard: scanner drops an event's edges when model median vs market-implied center exceeds `BASIS_ALARM_BPS` (logged as `basis_alarm`).
+**$0 maker fee + a fair bid + a ~6¢ spread is the entire thesis**: a resting ask
+sells above fair with no fee drag.
 
-## Fixed-point API migration (verified vs docs.kalshi.com 2026-07-13)
+## What is NOT an edge
 
-Kalshi moved money/count fields to strings: `*_dollars` (up to 6dp) and `*_fp` (2dp).
-Legacy cents/int fields are deprecated (fills' `side`/`action` past their May-2026 date).
-`kalshi/client.py::fp()/fpc()` parse new-first with legacy fallback.
+**Complete-set arbitrage does not exist.** Across 14 open events / 7 cities,
+`sum(bids)` mean **0.987** — the bid side is already fair. The "overround" in the
+mids is exactly half the six-leg spread and nothing more. And for any exhaustive
+partition the taker cost of a set is `0.07 × (1 − Σpᵢ²)` — **structurally largest
+exactly where the apparent overround is biggest**. 0/14 events clear; best case
+−2.5¢. Several events have a leg with no bid at all: the set is unsellable.
 
-- **Fills**: `fill_id`, `outcome_side`, `count_fp`, `yes/no_price_dollars`, `is_taker`,
-  **`fee_cost` (real fees — no estimation needed)**. Dedup key = `fill_id`; rows without
-  one are skipped (NULLs are distinct under SQLite UNIQUE).
-- **Positions**: `position_fp`, `market_exposure_dollars` (aggregate cost),
-  `fees_paid_dollars`, `realized_pnl_dollars`.
-- **Settlements**: `revenue` (cents int), `yes/no_total_cost_dollars`, `fee_cost` →
-  pnl computed entirely from the settlement object.
-- **Orders**: V2 `POST /portfolio/events/orders`, yes-leg only: buy yes = `side:"bid"`
-  @ price; buy no = `side:"ask"` @ (1−price). String price/count, required
-  `time_in_force` + `self_trade_prevention_type`. Response: `fill_count`,
-  `remaining_count`, `average_fill_price`, `average_fee_paid` (no `status` field).
+## Liquidity
 
-**Shakeout checklist (first real fills):**
-- ~~taker fee vs 0.07·p(1−p)~~ **VERIFIED 2026-07-14** against a real fill
-  (KXWTI, 9.47 @ 0.51: model $0.1656 vs charged $0.1657 — multiplier and
-  centicent rounding confirmed).
-  Full pipeline reconciled to the cent vs account balance.
-- maker fills expected $0 fee on quadratic-fee series — still unverified.
-- orderbook_fp depth SECOND field unit assumed CONTRACTS — confirm on first partial fill.
-- position `market_exposure_dollars` matches sum of fill costs — first desk position.
+- 🚩 **`liquidity_dollars` is `"0.0000"` on every weather market.** Any depth gate
+  reading it blocks every trade. Use `orderbook_fp` only.
+- Depth is fine at our size: top-of-book $5–38 per leg, $20–125 across 3 levels on
+  D+1 books. ~500× thinner than crypto — irrelevant at $25, fatal above ~$100/leg.
+- **D+0 books go degenerate** (one-sided at 0.01/0.99 once the day's high is
+  effectively known). **Trade D+1 and beyond only.**
+- Events are `collateral_return_type: "MECNET"` — offsetting legs within one event
+  net their collateral, so a gross-cost `PER_EVENT_CAP` overstates capital at risk.
 
-## API
+## Forecast data (all free, no key)
 
-- Base `https://api.elections.kalshi.com/trade-api/v2`. Public market data unauthenticated.
-- Auth: RSA-PSS(SHA-256, MGF1-SHA256, salt=digest len) over `timestamp_ms + METHOD + /trade-api/v2/...path` (no query string); headers `KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-TIMESTAMP`, `KALSHI-ACCESS-SIGNATURE` (base64).
-- Rate limit ~600 req/min sustained; live budget at `GET /account/limits`.
-- Raw discovery dump: `docs/phase0_raw.json` (scripts/phase0.py to refresh).
+- **Ensemble** — `ensemble-api.open-meteo.com/v1/ensemble`. Verified members:
+  `gfs025` 31, `ecmwf_ifs025` 51, `icon_seamless` 40, `gem_global` 21.
+  🚩 **Never `ecmwf_ifs04`** — deprecated, returns 1 member, would silently
+  collapse the pooled spread. `timezone=America/New_York` is mandatory.
+  Free tier is licensed **non-commercial** — revisit if this ever earns.
+- **Archived forecasts** — `previous-runs-api.open-meteo.com/v1/forecast`,
+  `temperature_2m_previous_day1..7`, back to ≥2023. **Hourly only** (the daily-max
+  variables 400 out), so aggregate the local-day max yourself — which is *more*
+  faithful to the NWS midnight-to-midnight day anyway.
+- **No archived ENSEMBLE exists.** Per-member history returns 100% nulls. Fit the
+  spread from the deterministic run's realised error; production pools a
+  multi-model ensemble for the centre, which is strictly better — so the fit is
+  conservative w.r.t. what we trade.
+- **Actuals** — Iowa State IEM ASOS:
+  `mesonet.agron.iastate.edu/cgi-bin/request/daily.py?network=NY_ASOS&stations=NYC`.
+  🚩 **NEVER use Open-Meteo's ERA5 archive as "actual"**: +1.90°F bias vs KNYC,
+  22% exact-integer agreement over 67 days. Buckets are 2°F wide — ERA5 is off by
+  ~a full bucket, systematically warm, and would corrupt the fit invisibly.
+
+## Model calibration (measured, KNYC, 2023-07→2026-07, n=1076)
+
+- **Bias is strongly SEASONAL**: lead-1d runs **Mar −2.72°F → Jul +2.42°F**, a
+  5.1°F swing = **2.5 buckets**. The annual mean (−0.51°F) is **2.41°F wrong every
+  summer day** while annual PIT coverage still looks fine because seasons cancel.
+  Fitted per month (±30d windows), interpolated by day-of-year.
+- Lead-1d sd ≈ 3.45°F annual; summer ≈ 2.8°F.
+- **Raw ensemble spread is underdispersed ~1.7×** (1.5–2.0°F vs realised 2.81°F).
+  The ensemble may only ever **widen** our distribution, never narrow it.
+- Inter-model disagreement (90.1→96.0°F) swamps intra-model spread (~1.6°F) →
+  multi-model pooling is the cheap, principled fix.
+- PIT coverage after the seasonal fit: all-year 54/82/95, Jun–Aug 55/81/95 vs
+  nominal 50/80/95. Tails — where we would trade — are well calibrated.
+
+## Kalshi API (unchanged from the crypto desk)
+
+- fp-string fields (`*_dollars`, `*_fp`); legacy int-cents fields are gone.
+- Orders V2 only: create `POST /portfolio/events/orders`, **cancel
+  `DELETE /portfolio/events/orders/{id}`** (legacy path 410s), amend
+  `POST /portfolio/events/orders/{id}/amend` (queue position is preserved only
+  when size decreases).
+- POST retries **429 only** — a 500 may have executed.
+- **Netting**: offsetting yes/no lots pay $1/matched pair *at netting time*; the
+  later settlement object then reports `revenue: 0` with both side costs
+  populated. `pnl = revenue − costs − fees` books the whole basis as a loss. See
+  `run_desk.sync_portfolio`. When a P&L number looks alarming, check whether the
+  **cash actually moved** before believing it.
+- History: candlesticks return **`yes_bid`/`yes_ask`** series, but market data
+  starts **2026-05-09** (~68 event-days/city; older events return `markets: []`).

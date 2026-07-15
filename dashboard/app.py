@@ -89,6 +89,13 @@ def _arm_rejection(status: dict, now: float) -> str | None:
     return None
 
 
+def _forecast_status() -> str:
+    """Fresh/stale/missing for the fitted weather calibration. Must CALL
+    load_calibration(): STATUS is set as a side effect of the load."""
+    weather.load_calibration()
+    return weather.STATUS
+
+
 @app.get("/")
 def index():
     return FileResponse(HERE / "index.html")
@@ -170,7 +177,7 @@ def state():
     pnl_today = db.strategy_pnl(con, now - (now % 86400), now)
     latest_model_start = q(
         con, "SELECT COALESCE(MAX(ts),0) FROM events WHERE kind='start' "
-             "AND detail LIKE '%model=r4%'"
+             "AND detail LIKE '%model=w1%'"
     )[0][0]
     edges = q(con, """SELECT ts, ticker, side, fair, price, edge, acted FROM edges e
                       WHERE ts>=? AND ts = (SELECT MAX(ts) FROM edges WHERE ticker=e.ticker
@@ -207,7 +214,9 @@ def state():
         },
         "pnl_today": pnl_today,
         "pos_fairs": pos_fairs,
-        "forecast": {"status": weather.STATUS},
+        # load_calibration() SETS weather.STATUS as a side effect; reading the
+        # module global without calling it always reports a stale "missing"
+        "forecast": {"status": _forecast_status()},
         "edges": [dict(zip(["ts", "ticker", "side", "fair", "price", "edge", "acted"], e))
                   for e in edges],
         "events": [dict(zip(["ts", "kind", "detail"], e)) for e in events],
