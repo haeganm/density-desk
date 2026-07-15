@@ -8,8 +8,11 @@ import config
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS snapshots(   -- every scan cycle, per market
-  ts REAL, ticker TEXT, event TEXT, asset TEXT, strike REAL, settle_ts REAL,
-  fair REAL, bid REAL, ask REAL, index_price REAL);
+  -- floor and cap are stored SEPARATELY: the crypto schema kept one `strike`
+  -- written as `floor_strike or cap_strike`, which is lossy for brackets and
+  -- silently drops a floor of 0.
+  ts REAL, ticker TEXT, event TEXT, city TEXT, floor_strike REAL, cap_strike REAL,
+  settle_ts REAL, fair REAL, bid REAL, ask REAL, model_center REAL);
 CREATE TABLE IF NOT EXISTS edges(       -- actionable edges found
   ts REAL, ticker TEXT, side TEXT, fair REAL, price REAL, edge REAL,
   size INTEGER, acted INTEGER DEFAULT 0, reason TEXT);
@@ -27,28 +30,29 @@ CREATE TABLE IF NOT EXISTS events(      -- halts, alarms, operator notes
 CREATE TABLE IF NOT EXISTS equity(      -- per-cycle snapshots (peak/trough, sparkline)
   ts REAL, cash REAL, open_cost REAL);
 CREATE TABLE IF NOT EXISTS contracts(   -- immutable payoff metadata, latest API truth
-  ticker TEXT PRIMARY KEY, event TEXT, asset TEXT, settle_ts REAL,
+  ticker TEXT PRIMARY KEY, event TEXT, city TEXT, settle_ts REAL,
   strike_type TEXT, floor_strike REAL, cap_strike REAL);
 CREATE TABLE IF NOT EXISTS surfaces(    -- one prospective, versioned event surface per scan
-  ts REAL, event TEXT, asset TEXT, settle_ts REAL, model_version TEXT,
+  -- repair_max/catalyst_*/regime_json were crypto-only and are gone; an ECDF is
+  -- monotone by construction and weather has no exogenous macro calendar.
+  ts REAL, event TEXT, city TEXT, settle_ts REAL, model_version TEXT,
   model_center REAL, model_iqr REAL, market_center REAL, market_iqr REAL,
-  width_ratio REAL, repair_max REAL, profile_status TEXT, profile_age_s REAL,
-  catalyst_factor REAL, catalyst_blocked INTEGER, contracts_json TEXT,
-  regime_json TEXT,
+  width_ratio REAL, forecast_status TEXT, forecast_age_s REAL,
+  spread_widen REAL, contracts_json TEXT,
   PRIMARY KEY(ts,event,model_version));
-CREATE TABLE IF NOT EXISTS outcomes(    -- asset-settlement result, not one row per contract
-  asset TEXT, settle_ts REAL, expiration_value REAL, finalized_ts REAL,
-  PRIMARY KEY(asset,settle_ts));
+CREATE TABLE IF NOT EXISTS outcomes(    -- city-settlement result, not one row per contract
+  city TEXT, settle_ts REAL, expiration_value REAL, finalized_ts REAL,
+  PRIMARY KEY(city,settle_ts));
 CREATE TABLE IF NOT EXISTS order_evidence( -- exact model/order attribution; manual orders absent
   client_order_id TEXT PRIMARY KEY, order_id TEXT, ticker TEXT,
-  model_version TEXT, asset TEXT, settle_ts REAL,
+  model_version TEXT, city TEXT, settle_ts REAL,
   event_profit_model REAL, event_profit_market REAL,
   expected_pnl REAL, worst_loss REAL);
 CREATE INDEX IF NOT EXISTS idx_snap_ts ON snapshots(ts);
 CREATE INDEX IF NOT EXISTS idx_snap_ticker ON snapshots(ticker, ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts ON edges(ts);
 CREATE INDEX IF NOT EXISTS idx_orders_id ON orders(order_id);
-CREATE INDEX IF NOT EXISTS idx_surfaces_version ON surfaces(model_version,asset,settle_ts,ts);
+CREATE INDEX IF NOT EXISTS idx_surfaces_version ON surfaces(model_version,city,settle_ts,ts);
 CREATE INDEX IF NOT EXISTS idx_order_evidence_id ON order_evidence(order_id);
 """
 
@@ -84,7 +88,7 @@ def record_contracts(con, rows) -> None:
     """Persist the payoff definition needed to score fills after the market disappears."""
     con.executemany(
         """INSERT INTO contracts VALUES(?,?,?,?,?,?,?)
-           ON CONFLICT(ticker) DO UPDATE SET event=excluded.event,asset=excluded.asset,
+           ON CONFLICT(ticker) DO UPDATE SET event=excluded.event,city=excluded.city,
              settle_ts=excluded.settle_ts,strike_type=excluded.strike_type,
              floor_strike=excluded.floor_strike,cap_strike=excluded.cap_strike""",
         rows,
@@ -92,35 +96,31 @@ def record_contracts(con, rows) -> None:
 
 
 def record_surface(con, surface: dict) -> None:
-    """Store one JSON-backed observation per asset/settlement/scan/version.
+    """Store one JSON-backed observation per city/settlement/scan/version.
 
     Kalshi exposes the co-settling ladder and range as different events.  They
     are one risk event, so repeated calls in a scan merge their contract
     metadata instead of creating pseudo-independent surface observations.
     """
     version = surface.get("model_version", config.MODEL_VERSION)
-    asset, settle_ts, ts = surface["asset"], surface["settle_ts"], surface["ts"]
+    city, settle_ts, ts = surface["city"], surface["settle_ts"], surface["ts"]
     prior = con.execute(
         """SELECT model_center,model_iqr,market_center,market_iqr,width_ratio,
-                  repair_max,profile_status,profile_age_s,catalyst_factor,
-                  catalyst_blocked,contracts_json,regime_json
+                  forecast_status,forecast_age_s,spread_widen,contracts_json
            FROM surfaces
-           WHERE ts=? AND asset=? AND settle_ts=? AND model_version=?
+           WHERE ts=? AND city=? AND settle_ts=? AND model_version=?
            ORDER BY rowid DESC LIMIT 1""",
-        (ts, asset, settle_ts, version),
+        (ts, city, settle_ts, version),
     ).fetchone()
     names = ("model_center", "model_iqr", "market_center", "market_iqr",
-             "width_ratio", "repair_max", "profile_status", "profile_age_s",
-             "catalyst_factor", "catalyst_blocked")
-    prior_values = dict(zip(names, prior[:10])) if prior else {}
+             "width_ratio", "forecast_status", "forecast_age_s", "spread_widen")
+    prior_values = dict(zip(names, prior[:8])) if prior else {}
     prior_contracts, prior_scenarios = [], []
-    prior_regime = {}
     if prior:
         try:
-            payload = json.loads(prior[10] or "{}")
+            payload = json.loads(prior[8] or "{}")
             prior_contracts = payload.get("contracts", [])
             prior_scenarios = payload.get("scenarios", [])
-            prior_regime = json.loads(prior[11] or "{}")
         except (AttributeError, TypeError, json.JSONDecodeError):
             pass
     contracts = {
@@ -130,53 +130,50 @@ def record_surface(con, surface: dict) -> None:
     scenarios = [{"model_p": row[0], "market_p": row[1]}
                  for row in surface.get("scenarios", [])] or prior_scenarios
     con.execute(
-        "DELETE FROM surfaces WHERE ts=? AND asset=? AND settle_ts=? AND model_version=?",
-        (ts, asset, settle_ts, version),
+        "DELETE FROM surfaces WHERE ts=? AND city=? AND settle_ts=? AND model_version=?",
+        (ts, city, settle_ts, version),
     )
     def value(name, default=None):
         incoming = surface.get(name)
         return incoming if incoming is not None else prior_values.get(name, default)
 
     con.execute(
-        """INSERT OR REPLACE INTO surfaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT OR REPLACE INTO surfaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            ts, f"{asset}:{int(settle_ts)}", asset, settle_ts, version,
+            ts, f"{city}:{int(settle_ts)}", city, settle_ts, version,
             value("model_center"), value("model_iqr"),
             value("market_center"), value("market_iqr"),
-            value("width_ratio"), value("repair_max"),
-            value("profile_status"), value("profile_age_s"),
-            value("catalyst_factor", 1.0),
-            int(bool(surface.get("catalyst_blocked")
-                     or prior_values.get("catalyst_blocked"))),
+            value("width_ratio"),
+            value("forecast_status"), value("forecast_age_s"),
+            value("spread_widen"),
             json.dumps({"contracts": list(contracts.values()),
                         "scenarios": scenarios},
                        separators=(",", ":")),
-            json.dumps(surface.get("regime") or prior_regime, separators=(",", ":")),
         ),
     )
 
 
-def record_outcome(con, asset: str, settle_ts: float, expiration_value,
+def record_outcome(con, city: str, settle_ts: float, expiration_value,
                    finalized_ts: float | None = None) -> None:
     """Upsert exact settlement value; a later non-null API value wins."""
     value = None if expiration_value in (None, "") else float(expiration_value)
     con.execute(
         """INSERT INTO outcomes VALUES(?,?,?,?)
-           ON CONFLICT(asset,settle_ts) DO UPDATE SET
+           ON CONFLICT(city,settle_ts) DO UPDATE SET
              expiration_value=COALESCE(excluded.expiration_value,outcomes.expiration_value),
              finalized_ts=COALESCE(excluded.finalized_ts,outcomes.finalized_ts)""",
-        (asset, settle_ts, value, finalized_ts),
+        (city, settle_ts, value, finalized_ts),
     )
 
 
-def record_order_evidence(con, *, client_order_id: str, ticker: str, asset: str,
+def record_order_evidence(con, *, client_order_id: str, ticker: str, city: str,
                           settle_ts: float, event_profit_model: float,
                           event_profit_market: float, expected_pnl: float,
                           worst_loss: float, order_id: str | None = None,
                           model_version: str = config.MODEL_VERSION) -> None:
     con.execute(
         """INSERT OR REPLACE INTO order_evidence VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (client_order_id, order_id, ticker, model_version, asset, settle_ts,
+        (client_order_id, order_id, ticker, model_version, city, settle_ts,
          event_profit_model, event_profit_market, expected_pnl, worst_loss),
     )
 
@@ -278,19 +275,19 @@ def _threshold_crps(contracts: list[dict], expiration_value: float,
 def strategy_calibration(con, model_version: str = config.MODEL_VERSION) -> dict:
     """Exact-version, event-balanced calibration from prospective surfaces."""
     rows = con.execute(
-        """SELECT s.asset,s.settle_ts,s.contracts_json,o.expiration_value
+        """SELECT s.city,s.settle_ts,s.contracts_json,o.expiration_value
            FROM surfaces s JOIN outcomes o
-             ON o.asset=s.asset AND o.settle_ts=s.settle_ts
+             ON o.city=s.city AND o.settle_ts=s.settle_ts
            WHERE s.model_version=? AND o.expiration_value IS NOT NULL
              AND s.ts=(SELECT MAX(s2.ts) FROM surfaces s2
                        WHERE s2.model_version=s.model_version
-                         AND s2.asset=s.asset AND s2.settle_ts=s.settle_ts)""",
+                         AND s2.city=s.city AND s2.settle_ts=s.settle_ts)""",
         (model_version,),
     ).fetchall()
     grouped: dict[tuple[str, float], list[dict]] = {}
     values: dict[tuple[str, float], float] = {}
-    for asset, settle_ts, payload, expiration_value in rows:
-        key = (asset, settle_ts)
+    for city, settle_ts, payload, expiration_value in rows:
+        key = (city, settle_ts)
         try:
             decoded = json.loads(payload or "[]")
             contracts = decoded.get("contracts", []) if isinstance(decoded, dict) else decoded

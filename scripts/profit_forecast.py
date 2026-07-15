@@ -16,7 +16,7 @@ import db  # noqa: E402
 
 def _event_pnl(con, model_version: str) -> list[tuple[str, float, float]]:
     return con.execute(
-        """SELECT oe.asset,oe.settle_ts,
+        """SELECT oe.city,oe.settle_ts,
                   SUM(f.count *
                     ((CASE WHEN f.side='yes' THEN s.realized ELSE 1-s.realized END)
                      - f.price) - COALESCE(f.fee,0))
@@ -25,7 +25,7 @@ def _event_pnl(con, model_version: str) -> list[tuple[str, float, float]]:
            JOIN order_evidence oe ON oe.client_order_id=o.client_order_id
            JOIN settles s ON s.ticker=f.ticker
            WHERE oe.model_version=? AND f.side=o.side AND s.realized IS NOT NULL
-           GROUP BY oe.asset,oe.settle_ts ORDER BY oe.settle_ts""",
+           GROUP BY oe.city,oe.settle_ts ORDER BY oe.settle_ts""",
         (model_version,),
     ).fetchall()
 
@@ -51,16 +51,16 @@ def _block_bootstrap_mean_ci(values: list[float], samples: int = 2000):
 def collect_evidence(con, model_version: str = config.MODEL_VERSION) -> dict:
     calibration = db.strategy_calibration(con, model_version)
     fills = con.execute(
-        """SELECT COUNT(*),COALESCE(SUM(f.count),0),oe.asset,oe.settle_ts
+        """SELECT COUNT(*),COALESCE(SUM(f.count),0),oe.city,oe.settle_ts
            FROM order_evidence oe
            JOIN orders o ON o.client_order_id=oe.client_order_id
            LEFT JOIN fills f ON f.order_id=oe.order_id AND f.side=o.side
            WHERE oe.model_version=?
-           GROUP BY oe.asset,oe.settle_ts""",
+           GROUP BY oe.city,oe.settle_ts""",
         (model_version,),
     ).fetchall()
-    filled = [(asset, settle, records, contracts)
-              for records, contracts, asset, settle in fills if contracts]
+    filled = [(city, settle, records, contracts)
+              for records, contracts, city, settle in fills if contracts]
     timestamps = {settle for _, settle, *_ in filled}
     days = {dt.datetime.fromtimestamp(ts, dt.UTC).date() for ts in timestamps}
     event_pnl = _event_pnl(con, model_version)
@@ -70,7 +70,7 @@ def collect_evidence(con, model_version: str = config.MODEL_VERSION) -> dict:
         by_settlement[float(settle)] = by_settlement.get(float(settle), 0.0) + float(pnl)
     event_metrics = {}
     for row in con.execute(
-        """SELECT o.ts,oe.asset,oe.settle_ts,oe.event_profit_model,
+        """SELECT o.ts,oe.city,oe.settle_ts,oe.event_profit_model,
                   oe.event_profit_market,oe.expected_pnl,oe.worst_loss
            FROM order_evidence oe JOIN orders o
              ON o.client_order_id=oe.client_order_id
@@ -112,7 +112,7 @@ def render(evidence: dict) -> str:
         "",
         "A. EVENT-BALANCED MODEL VS MARKET",
         f"   scored contract observations: {c['contracts']}",
-        f"   scored asset-settlement keys: {c['event_risk_keys']}",
+        f"   scored city-settlement keys: {c['event_risk_keys']}",
         f"   distinct settlement timestamps: {c['settlement_timestamps']}",
         f"   distinct UTC days: {c['utc_days']}",
         f"   model/market Brier: {_metric(c['model_brier'])} / {_metric(c['market_brier'])}",
@@ -133,10 +133,10 @@ def render(evidence: dict) -> str:
     if metrics:
         lines += ["", "C. LATEST POST-FILL EVENT METRICS"]
         lines += [
-            f"   {asset} {dt.datetime.fromtimestamp(settle, dt.UTC):%Y-%m-%d %H:%MZ}"
+            f"   {city} {dt.datetime.fromtimestamp(settle, dt.UTC):%Y-%m-%d %H:%MZ}"
             f" | profit p model/market {model_p:.3f}/{market_p:.3f}"
             f" | expected P&L {expected:+.4f} | worst loss {worst:.4f}"
-            for asset, settle, model_p, market_p, expected, worst in metrics
+            for city, settle, model_p, market_p, expected, worst in metrics
         ]
     if ci:
         lines.append(

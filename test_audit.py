@@ -12,7 +12,7 @@ from dashboard import app as dashboard
 from engine import executor, rails
 from engine.scanner import Edge
 from ops import brief, operator_review
-from scripts import edge_analysis, profit_forecast
+from scripts import profit_forecast
 
 
 def _isolated_desk(tmp_path, monkeypatch):
@@ -33,9 +33,11 @@ def _isolated_desk(tmp_path, monkeypatch):
 
 def test_exact_utc_strategy_timestamps():
     assert config.STRATEGY_EPOCH == int(
-        dt.datetime(2026, 7, 14, 14, 30, tzinfo=dt.UTC).timestamp())
-    assert edge_analysis.CLEAN_TS == int(
-        dt.datetime(2026, 7, 13, 8, 29, tzinfo=dt.UTC).timestamp())
+        dt.datetime(2026, 7, 15, 23, 0, tzinfo=dt.UTC).timestamp())
+    # A hand-typed epoch 23h in the FUTURE once silently disabled the daily-loss
+    # rail (scope_ts = max(now-7d, EPOCH) matched no settles) and only this suite
+    # caught it. An epoch must always already have happened.
+    assert config.STRATEGY_EPOCH < time.time(), "STRATEGY_EPOCH is in the future"
 
 
 def test_strategy_pnl_is_consistent_and_fees_count_once(tmp_path, monkeypatch):
@@ -52,7 +54,7 @@ def test_strategy_pnl_is_consistent_and_fees_count_once(tmp_path, monkeypatch):
                  None, "f-manual"))
     con.execute("INSERT INTO settles VALUES(?,?,?,?,?)",
                 (now, "MANUAL-WTI", .5, 1, 100.0))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
                 (now, "DESK", "EVENT", "BTC", 60_000, settle, .8, .7, .9, 60_000))
     con.commit()
 
@@ -117,7 +119,7 @@ def test_executor_sizes_from_live_cash(tmp_path, monkeypatch):
         "SELECT order_id,model_version,event_profit_model,event_profit_market "
         "FROM order_evidence"
     ).fetchone()
-    assert evidence[:2] == ("o", "r4")
+    assert evidence[:2] == ("o", "w1")
     assert evidence[2:] == (0.0, 0.0)  # zero IOC fill leaves no event exposure
 
 
@@ -131,7 +133,7 @@ def test_evidence_excludes_unversioned_history_and_withholds_probability(tmp_pat
         ("ETH", epoch + 3600, .70, .65, 1),
     ]):
         ticker = f"T{i}"
-        con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
                     (epoch + 10, ticker, asset, asset, 100 + i, settle_ts,
                      fair, mid - .01, mid + .01, 100))
         con.execute("INSERT INTO settles VALUES(?,?,?,?,?)",
@@ -154,7 +156,7 @@ def test_operator_brief_deduplicates_edges_and_uses_explicit_settle(tmp_path,
     _, _, con = _isolated_desk(tmp_path, monkeypatch)
     now = time.time()
     ticker = "KXBTCD-26JUL1417-T64000"
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
                 (now, ticker, "EV", "BTC", 64_000, now + 3600, .6, .5, .6, 64_000))
     for ts, edge in ((now - 100, .05), (now - 50, .08)):
         con.execute("INSERT INTO edges VALUES(?,?,?,?,?,?,?,?,?)",

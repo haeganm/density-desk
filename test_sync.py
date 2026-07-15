@@ -61,7 +61,7 @@ def test_uncertain_order_is_relinked_before_fill_ingestion():
         "uncertain: timeout",
     ))
     db.record_order_evidence(
-        con, client_order_id="client-1", ticker="T", asset="BTC",
+        con, client_order_id="client-1", ticker="T", city="BTC",
         settle_ts=1_800_003_600.0, event_profit_model=.7,
         event_profit_market=.6, expected_pnl=.5, worst_loss=.82,
     )
@@ -182,7 +182,7 @@ def test_unresolved_uncertain_order_fails_portfolio_sync():
         "uncertain: timeout",
     ))
     db.record_order_evidence(
-        con, client_order_id="missing-client", ticker="T", asset="BTC",
+        con, client_order_id="missing-client", ticker="T", city="BTC",
         settle_ts=1_800_003_600.0, event_profit_model=.7,
         event_profit_market=.6, expected_pnl=.2, worst_loss=.41,
     )
@@ -205,7 +205,7 @@ def test_outcome_waits_for_finality_and_survives_long_delay():
     ticker = "OLD-T100"
     con.execute("INSERT INTO contracts VALUES(?,?,?,?,?,?,?)",
                 (ticker, "E", "BTC", planned, "greater", 100.0, None))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
                 (planned - 60, ticker, "E", "BTC", 100.0, planned,
                  .60, .58, .62, 100.0))
     con.commit()
@@ -228,7 +228,7 @@ def test_outcome_waits_for_finality_and_survives_long_delay():
     run_desk.record_settlements(MarketLookup("finalized"), con)
     expected = dt.datetime.fromisoformat("2026-07-15T03:00:00+00:00").timestamp()
     assert con.execute(
-        "SELECT expiration_value,finalized_ts FROM outcomes WHERE asset='BTC'"
+        "SELECT expiration_value,finalized_ts FROM outcomes WHERE city='BTC'"
     ).fetchone() == (101.25, expected)
     assert con.execute(
         "SELECT ts,realized FROM settles WHERE ticker=?", (ticker,)
@@ -244,7 +244,7 @@ def test_scan_failure_still_runs_portfolio_sync(monkeypatch):
     def fail_scan():
         raise RuntimeError("scanner broke")
 
-    monkeypatch.setattr(run_desk.scanner, "fetch_all_chains", fail_scan)
+    monkeypatch.setattr(run_desk.scanner, "fetch_all_forecasts", fail_scan)
     monkeypatch.setattr(run_desk, "sync_portfolio",
                         lambda kalshi, connection: calls.append("sync"))
     monkeypatch.setattr(run_desk, "record_settlements",

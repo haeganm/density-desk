@@ -43,15 +43,15 @@ def active_halt_until(now: float | None = None, path=None) -> float | None:
     return None
 
 
-def check_global(con, deribit_age_s: float, kalshi_age_s: float) -> None:
+def check_global(con, model_age_s: float, kalshi_age_s: float) -> None:
     """Run once per executor cycle before any order."""
     if config.KILL_FILE.exists():
         raise RailsHalt("KILL file present")
     until = active_halt_until()
     if until is not None:
         raise RailsHalt(f"daily-loss halt until {dt.datetime.fromtimestamp(until, dt.UTC)}")
-    if deribit_age_s > config.STALE_DATA_HALT_S or kalshi_age_s > config.STALE_DATA_HALT_S:
-        raise RailsHalt(f"stale data (deribit {deribit_age_s:.0f}s, kalshi {kalshi_age_s:.0f}s)")
+    if model_age_s > config.STALE_DATA_HALT_S or kalshi_age_s > config.STALE_DATA_HALT_S:
+        raise RailsHalt(f"stale data (forecast {model_age_s:.0f}s, kalshi {kalshi_age_s:.0f}s)")
     midnight = _utc_midnight()
     # min(): the version-scoped view AND the whole desk book must both be
     # inside the limit — an epoch bump can never re-open the day's loss budget

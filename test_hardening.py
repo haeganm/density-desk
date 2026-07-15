@@ -36,9 +36,9 @@ def _desk(tmp_path, monkeypatch):
     return db.connect()
 
 
-def _edge(ticker, event, settle, asset="BTC", price=.25, fair=.49):
+def _edge(ticker, event, settle, city="NYC", price=.25, fair=.49):
     scenarios = ((.75, .65, (ticker,)), (.25, .35, ()))
-    return Edge(ticker, event, asset, "yes", price, fair, fair - price, settle,
+    return Edge(ticker, event, city, "yes", price, fair, fair - price, settle,
                 scenarios)
 
 
@@ -101,13 +101,13 @@ def test_event_cap_combines_asset_settlement_but_not_later_settlement(tmp_path,
     monkeypatch.setattr(config, "PER_EVENT_CAP", 1.0)
     now = time.time()
     settle = now + 3600
-    held = "KXBTCD-HELD-T60000"
+    held = "KXHIGHNY-HELD-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", "old", held, "yes", "buy", 2, .5, .6, "filled"))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (now, held, "LADDER", "BTC", 60_000, settle, .6, .5, .6, 60_000))
-    same = _edge("KXBTC-SAME-B60000", "RANGE", settle)
-    later = _edge("KXBTC-LATER-B60000", "OTHER", settle + 3600)
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
+                (now, held, "LADDER", "NYC", 60_000, settle, .6, .5, .6, 60_000))
+    same = _edge("KXHIGHNY-SAME-B60000", "RANGE", settle)
+    later = _edge("KXHIGHNY-LATER-B60000", "OTHER", settle + 3600)
     _record_edge(con, same, now + 1)
     _record_edge(con, later, now + 2)
     kalshi = FakeKalshi(positions=[{
@@ -128,10 +128,10 @@ def test_event_cap_combines_asset_settlement_but_not_later_settlement(tmp_path,
 def test_unmapped_strategy_position_fails_closed_for_its_asset(tmp_path, monkeypatch):
     con = _desk(tmp_path, monkeypatch)
     now = time.time()
-    held = "KXBTCD-UNMAPPED-T60000"
+    held = "KXHIGHNY-UNMAPPED-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", "old", held, "yes", "buy", 1, .5, .6, "filled"))
-    edge = _edge("KXBTC-NEW-B60000", "RANGE", now + 3600)
+    edge = _edge("KXHIGHNY-NEW-B60000", "RANGE", now + 3600)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=[{
         "ticker": held,
@@ -149,10 +149,10 @@ def test_unmapped_strategy_position_fails_closed_for_its_asset(tmp_path, monkeyp
 def test_unmapped_manual_position_only_counts_toward_global_exposure(tmp_path,
                                                                      monkeypatch):
     con = _desk(tmp_path, monkeypatch)
-    edge = _edge("KXBTC-NEW-B60000", "RANGE", time.time() + 3600)
+    edge = _edge("KXHIGHNY-NEW-B60000", "RANGE", time.time() + 3600)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=[{
-        "ticker": "KXBTCD-MANUAL-T60000",  # no strategy order: user-owned position
+        "ticker": "KXHIGHNY-MANUAL-T60000",  # no strategy order: user-owned position
         "market_exposure_dollars": "0.5000",
         "position_fp": "1.00",
     }])
@@ -167,19 +167,19 @@ def test_unmapped_manual_position_only_counts_toward_global_exposure(tmp_path,
 def test_manual_change_to_versioned_desk_ticker_fails_closed(tmp_path, monkeypatch):
     con = _desk(tmp_path, monkeypatch)
     now, settle = time.time(), time.time() + 3600
-    held = "KXBTCD-R4-T60000"
+    held = "KXHIGHNY-R4-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", "coid", held, "yes", "buy", 2, .4, .7, "filled"))
     db.record_order_evidence(
-        con, client_order_id="coid", order_id="old", ticker=held, asset="BTC",
+        con, client_order_id="coid", order_id="old", ticker=held, city="NYC",
         settle_ts=settle, event_profit_model=.7, event_profit_market=.6,
         expected_pnl=.5, worst_loss=.81,
     )
     con.execute("INSERT INTO fills VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", held, "yes", "buy", 2, .4, .01, .7, "r4-fill"))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (now, held, "LADDER", "BTC", 60_000, settle, .7, .4, .5, 60_000))
-    edge = _edge("KXBTC-NEW-B60000", "RANGE", settle)
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
+                (now, held, "LADDER", "NYC", 60_000, settle, .7, .4, .5, 60_000))
+    edge = _edge("KXHIGHNY-NEW-B60000", "RANGE", settle)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=[{
         "ticker": held, "market_exposure_dollars": "1.2000",
@@ -198,8 +198,8 @@ def test_sync_failure_blocks_execute_but_not_public_scan(tmp_path, monkeypatch):
     calls = []
     chain = SimpleNamespace(fetched_ts=time.time())
     edge = _edge("T", "E", time.time() + 3600)
-    monkeypatch.setattr(run_desk.scanner, "fetch_all_chains",
-                        lambda: calls.append("scan") or {"BTC": chain})
+    monkeypatch.setattr(run_desk.scanner, "fetch_all_forecasts",
+                        lambda: calls.append("scan") or {"NYC": chain})
     monkeypatch.setattr(run_desk.scanner, "scan",
                         lambda *_args: ([edge], edge.settle_ts))
     monkeypatch.setattr(run_desk, "sync_portfolio",
@@ -218,7 +218,7 @@ def test_sync_failure_blocks_execute_but_not_public_scan(tmp_path, monkeypatch):
 def test_authoritative_portfolio_value_drives_drawdown_and_dynamic_exposure(tmp_path,
                                                                             monkeypatch):
     con = _desk(tmp_path, monkeypatch)
-    edge = _edge("KXBTC-NEW-B60000", "RANGE", time.time() + 3600)
+    edge = _edge("KXHIGHNY-NEW-B60000", "RANGE", time.time() + 3600)
     _record_edge(con, edge)
     kalshi = FakeKalshi(
         cash=1.0,
@@ -257,7 +257,7 @@ def test_status_records_authoritative_equity_and_health(tmp_path, monkeypatch):
 def test_settlement_overwrites_calibration_timestamp_result_and_pnl(tmp_path,
                                                                     monkeypatch):
     con = _desk(tmp_path, monkeypatch)
-    ticker = "KXBTCD-X-T60000"
+    ticker = "KXHIGHNY-X-T60000"
     con.execute("INSERT INTO settles VALUES(?,?,?,?,?)",
                 (1.0, ticker, .62, 1, 0.0))
     con.commit()
@@ -327,7 +327,7 @@ def test_no_fill_price_is_inverted_before_consuming_event_room(tmp_path, monkeyp
     monkeypatch.setattr(executor, "kelly_contracts", lambda *_args, **_kwargs: 1)
     settle = time.time() + 3600
     scenarios = ((.05, .10, ("NO-FIRST",)), (.95, .90, ()))
-    first = Edge("NO-FIRST", "LADDER", "BTC", "no", .85, .95, .09, settle,
+    first = Edge("NO-FIRST", "LADDER", "NYC", "no", .85, .95, .09, settle,
                  scenarios)
     second = _edge("YES-SECOND", "RANGE", settle)
     _record_edge(con, first)
@@ -481,7 +481,7 @@ def test_operator_stop_is_rechecked_before_every_order(tmp_path, monkeypatch,
 
 def test_executor_rechecks_final_window_at_send_time(tmp_path, monkeypatch):
     con = _desk(tmp_path, monkeypatch)
-    edge = _edge("TOO-LATE", "A", time.time() + 44 * 60)
+    edge = _edge("TOO-LATE", "A", time.time() + 20 * 60)
     _record_edge(con, edge)
     kalshi = FakeKalshi()
 
@@ -491,22 +491,6 @@ def test_executor_rechecks_final_window_at_send_time(tmp_path, monkeypatch):
     assert con.execute("SELECT reason FROM edges").fetchone()[0] == "final_window"
 
 
-@pytest.mark.parametrize("policy,fair,reason", [
-    ((True, 2.0), .49, "catalyst_window"),
-    ((False, 2.0), .30, "catalyst_threshold"),
-])
-def test_executor_rechecks_catalyst_at_send_time(tmp_path, monkeypatch,
-                                                  policy, fair, reason):
-    con = _desk(tmp_path, monkeypatch)
-    edge = _edge("CATALYST", "A", time.time() + 3600, fair=fair)
-    _record_edge(con, edge)
-    monkeypatch.setattr(executor, "catalyst_policy", lambda *_args: policy)
-    kalshi = FakeKalshi()
-
-    executor.execute(kalshi, con, [edge], 0)
-
-    assert not kalshi.created
-    assert con.execute("SELECT reason FROM edges").fetchone()[0] == reason
 
 
 def test_second_order_kelly_uses_cash_after_first_fill(tmp_path, monkeypatch):
@@ -542,11 +526,11 @@ def test_kelly_is_final_position_target_and_opposite_side_is_blocked(tmp_path,
                                                                      monkeypatch):
     con = _desk(tmp_path, monkeypatch)
     now, settle = time.time(), time.time() + 3600
-    ticker = "KXBTCD-TARGET-T60000"
+    ticker = "KXHIGHNY-TARGET-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", "old", ticker, "yes", "buy", 4, .2, .7, "filled"))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (now, ticker, "LADDER", "BTC", 60_000, settle, .75, .2, .25, 60_000))
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
+                (now, ticker, "LADDER", "NYC", 60_000, settle, .75, .2, .25, 60_000))
     con.commit()
     edge = _edge(ticker, "LADDER", settle)
     _record_edge(con, edge)
@@ -573,15 +557,15 @@ def test_fees_count_toward_event_cap(tmp_path, monkeypatch):
     con = _desk(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "PER_EVENT_CAP", 1.0)
     now, settle = time.time(), time.time() + 3600
-    held = "KXBTCD-FEE-T60000"
+    held = "KXHIGHNY-FEE-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", "old", held, "yes", "buy", 2, .49, .7, "filled"))
     con.execute("INSERT INTO fills VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "old", held, "yes", "buy", 2, .49, .03, .7, "fill-old"))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (now, held, "LADDER", "BTC", 60_000, settle, .7, .4, .5, 60_000))
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
+                (now, held, "LADDER", "NYC", 60_000, settle, .7, .4, .5, 60_000))
     con.commit()
-    edge = _edge("KXBTC-NEW-B60000", "RANGE", settle)
+    edge = _edge("KXHIGHNY-NEW-B60000", "RANGE", settle)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=[{
         "ticker": held, "market_exposure_dollars": ".9800", "position_fp": "2.00"}])
@@ -597,14 +581,14 @@ def test_open_worst_loss_reserves_the_utc_settlement_day(tmp_path, monkeypatch):
     con = _desk(tmp_path, monkeypatch)
     day_start = (int(time.time()) // 86400 + 1) * 86400
     first_settle, second_settle = day_start + 3600, day_start + 7200
-    held = "KXBTCD-RESERVE-T60000"
+    held = "KXHIGHNY-RESERVE-T60000"
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), "old", "old", held, "yes", "buy", 8, .6, .7, "filled"))
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (time.time(), held, "LADDER", "BTC", 60_000, first_settle,
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
+                (time.time(), held, "LADDER", "NYC", 60_000, first_settle,
                  .7, .5, .6, 60_000))
     con.commit()
-    edge = _edge("KXBTCD-NEXT-T61000", "LATER", second_settle)
+    edge = _edge("KXHIGHNY-NEXT-T61000", "LATER", second_settle)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=[{
         "ticker": held, "market_exposure_dollars": "4.8000", "position_fp": "8.00"}])
@@ -624,7 +608,7 @@ def test_versioned_hedged_event_reserves_joint_worst_loss_not_sum_of_costs(
     first_settle, second_settle = day_start + 3600, day_start + 7200
     positions = []
     for index, (ticker, side, signed) in enumerate((
-        ("KXBTCD-HEDGE-A", "yes", 5), ("KXBTCD-HEDGE-B", "no", -5),
+        ("KXHIGHNY-HEDGE-A", "yes", 5), ("KXHIGHNY-HEDGE-B", "no", -5),
     )):
         order_id, client_id = f"old-{index}", f"client-{index}"
         con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)", (
@@ -633,15 +617,15 @@ def test_versioned_hedged_event_reserves_joint_worst_loss_not_sum_of_costs(
         ))
         db.record_order_evidence(
             con, client_order_id=client_id, order_id=order_id, ticker=ticker,
-            asset="BTC", settle_ts=first_settle, event_profit_model=.8,
+            city="NYC", settle_ts=first_settle, event_profit_model=.8,
             event_profit_market=.7, expected_pnl=.2, worst_loss=.10,
         )
         con.execute("INSERT INTO fills VALUES(?,?,?,?,?,?,?,?,?,?)", (
             now + index, order_id, ticker, side, "buy", 5, .49, .01, .70,
             f"fill-{index}",
         ))
-        con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)", (
-            now, ticker, "LADDER", "BTC", 60_000 + index, first_settle,
+        con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)", (
+            now, ticker, "LADDER", "NYC", 60_000 + index, first_settle,
             .70, .48, .50, 60_000,
         ))
         positions.append({
@@ -649,7 +633,7 @@ def test_versioned_hedged_event_reserves_joint_worst_loss_not_sum_of_costs(
             "position_fp": f"{signed:.2f}",
         })
     con.commit()
-    edge = _edge("KXBTCD-NEXT-T61000", "LATER", second_settle)
+    edge = _edge("KXHIGHNY-NEXT-T61000", "LATER", second_settle)
     _record_edge(con, edge)
     kalshi = FakeKalshi(positions=positions)
 
@@ -678,7 +662,7 @@ def test_arm_clock_health_keeps_authenticated_sync_sample(tmp_path, monkeypatch)
             return []
 
     kalshi = ClockKalshi()
-    monkeypatch.setattr(run_desk.scanner, "fetch_all_chains", lambda: {"BTC": chain})
+    monkeypatch.setattr(run_desk.scanner, "fetch_all_forecasts", lambda: {"NYC": chain})
 
     def public_scan(*_args):
         kalshi.clock_skew_s = 12.0

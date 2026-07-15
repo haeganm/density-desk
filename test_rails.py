@@ -114,7 +114,7 @@ def test_strategy_pnl_counts_no_side_entry_fills_journaled_as_sell():
                 (now, "o-no", "c-no", "NO-TICKER", "no", "buy", 2, 0.85, 0.90,
                  "ioc filled 2/2"))
     db.record_order_evidence(
-        con, client_order_id="c-no", ticker="NO-TICKER", asset="BTC",
+        con, client_order_id="c-no", ticker="NO-TICKER", city="BTC",
         settle_ts=now + 3600, event_profit_model=.7, event_profit_market=.6,
         expected_pnl=.1, worst_loss=1.71, model_version="test")
     db.link_order_evidence(con, "c-no", "o-no")

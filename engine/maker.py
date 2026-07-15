@@ -117,7 +117,7 @@ def _amend(kalshi, con, order: dict, edge, count: float) -> float | None:
     return edge.price
 
 
-def manage(kalshi, con, edges, portfolio, deribit_age_s: float = 0.0,
+def manage(kalshi, con, edges, portfolio, model_age_s: float = 0.0,
            kalshi_age_s: float = 0.0) -> list[str]:
     if not getattr(kalshi, "can_trade", False) or not config.MAKER_ENABLED:
         return []
@@ -171,7 +171,7 @@ def manage(kalshi, con, edges, portfolio, deribit_age_s: float = 0.0,
     if room <= 0 or not live:
         return log
     try:
-        rails.check_global(con, deribit_age_s, kalshi_age_s)
+        rails.check_global(con, model_age_s, kalshi_age_s)
     except rails.RailsHalt:
         return log                                    # cancels above already ran
 
@@ -221,7 +221,7 @@ def manage(kalshi, con, edges, portfolio, deribit_age_s: float = 0.0,
                     (now, "?", coid, e.ticker, e.side, "buy", n, e.price,
                      e.fair, "sent"))
         db.record_order_evidence(
-            con, client_order_id=coid, ticker=e.ticker, asset=e.asset,
+            con, client_order_id=coid, ticker=e.ticker, city=e.city,
             settle_ts=e.settle_ts, event_profit_model=0.0, event_profit_market=0.0,
             expected_pnl=e.edge * n, worst_loss=risk,
             model_version=getattr(e, "model_version", config.MODEL_VERSION))

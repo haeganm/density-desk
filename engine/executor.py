@@ -12,7 +12,7 @@ import httpx
 import config
 import db
 from engine import fees, rails
-from engine.scanner import Edge, STAND_DOWN_FINAL_S, catalyst_policy
+from engine.scanner import Edge, STAND_DOWN_FINAL_S
 from kalshi.client import KalshiAPIError, fp, fpc
 
 
@@ -260,10 +260,11 @@ def _log_halt_once(con, msg: str) -> None:
         con.commit()
 
 
-def _strategy_asset(ticker: str) -> str | None:
-    for asset, series in config.SERIES.items():
-        if any(ticker.startswith(series[kind] + "-") for kind in ("ladder", "range")):
-            return asset
+def _strategy_city(ticker: str) -> str | None:
+    """Which city's book does this ticker belong to? One series per city now."""
+    for city, cfg in config.CITIES.items():
+        if ticker.startswith(cfg["series"] + "-"):
+            return city
     return None
 
 
@@ -277,7 +278,7 @@ def _mark_edge(con, edge: Edge, reason: str, size: float = 0, acted: int = 0) ->
     )
 
 
-def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
+def execute(kalshi, con, edges: list[Edge], model_age_s: float,
             kalshi_age_s: float = 0.0, portfolio: dict | None = None) -> list[str]:
     """Take the best edges within rails. Returns human-readable action log."""
     log: list[str] = []
@@ -286,7 +287,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
     if not config.ARMED_FILE.exists():         # dashboard toggle; default DISARMED
         return ["DISARMED: scan-only (arm on dashboard)"]
     try:
-        rails.check_global(con, deribit_age_s, kalshi_age_s)
+        rails.check_global(con, model_age_s, kalshi_age_s)
     except rails.RailsHalt as e:
         _log_halt_once(con, str(e))
         return [f"HALT: {e}"]
@@ -326,11 +327,11 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
                    WHERE f.ticker=? AND o.ts>=?""", (t, scope_ts)
             ).fetchone()[0] or 0.0)
             if abs(desk_count - pos_count.get(t, 0.0)) > 1e-6:
-                asset = _strategy_asset(t)
-                if asset:
-                    unmapped_assets.add(asset)
+                city = _strategy_city(t)
+                if city:
+                    unmapped_assets.add(city)
                 continue
-        row = con.execute("SELECT asset,settle_ts FROM snapshots WHERE ticker=? "
+        row = con.execute("SELECT city,settle_ts FROM snapshots WHERE ticker=? "
                           "ORDER BY ts DESC LIMIT 1", (t,)).fetchone()
         if row and row[0] and row[1] is not None:
             key = (row[0], int(row[1]))
@@ -344,14 +345,14 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
             ev_cost[key] = ev_cost.get(key, 0.0) + risk
             ev_positions.setdefault(key, {})[t] = (pos_count.get(t, 0.0), risk)
         else:
-            asset = _strategy_asset(t)
-            if asset:
-                unmapped_assets.add(asset)
+            city = _strategy_city(t)
+            if city:
+                unmapped_assets.add(city)
     for key, event_cost in ev_cost.items():
         row = con.execute(
             """SELECT oe.worst_loss FROM order_evidence oe JOIN orders o
                  ON o.client_order_id=oe.client_order_id
-               WHERE oe.model_version=? AND oe.asset=? AND CAST(oe.settle_ts AS INT)=?
+               WHERE oe.model_version=? AND oe.city=? AND CAST(oe.settle_ts AS INT)=?
                  AND EXISTS (SELECT 1 FROM fills f WHERE f.order_id=oe.order_id
                              AND f.action='buy' AND f.count>0)
                ORDER BY o.ts DESC LIMIT 1""",
@@ -366,7 +367,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
     edges = sorted(
         (e for e in edges if not getattr(e, "maker", False)),   # maker.manage owns those
         key=lambda edge: edge_priority(
-            edge, ev_positions.get((edge.asset, int(edge.settle_ts)), {}), cash
+            edge, ev_positions.get((edge.city, int(edge.settle_ts)), {}), cash
         ),
         reverse=True,
     )
@@ -381,7 +382,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
         if e.event in paused:
             _mark_edge(con, e, "api_rejection")
             continue
-        risk_key = (e.asset, int(e.settle_ts))
+        risk_key = (e.city, int(e.settle_ts))
         if risk_key in submitted_keys:
             _mark_edge(con, e, "event_pacing")
             continue
@@ -389,7 +390,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
         if held_count and ((held_count > 0) != (e.side == "yes")):
             _mark_edge(con, e, "opposite_position")
             continue
-        if e.asset in unmapped_assets:
+        if e.city in unmapped_assets:
             _mark_edge(con, e, "unmapped_position")
             continue
         held_risk = ticker_risk.get(e.ticker, 0.0)
@@ -485,7 +486,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
             log.append("DISARMED: stopped before next order")
             break
         try:
-            rails.check_global(con, deribit_age_s, kalshi_age_s)
+            rails.check_global(con, model_age_s, kalshi_age_s)
         except rails.RailsHalt as ex:
             reason = "kill" if config.KILL_FILE.exists() else "global_halt"
             for pending in edges[i:]:
@@ -493,13 +494,11 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
             _log_halt_once(con, str(ex))
             log.append(f"HALT: {ex}")
             break
-        catalyst_skip, catalyst_factor = catalyst_policy(time.time(), e.settle_ts)
+        # send-time edge re-check. (No catalyst policy on weather: there is no
+        # exogenous macro calendar to widen for -- the forecast IS the event.)
         live_edge = e.fair - ask - fees.taker_fee(ask, 1)
-        if catalyst_skip:
-            _mark_edge(con, e, "catalyst_window")
-            continue
-        if live_edge <= config.TAKER_EDGE_MIN * catalyst_factor:
-            _mark_edge(con, e, "catalyst_threshold")
+        if live_edge <= config.TAKER_EDGE_MIN:
+            _mark_edge(con, e, "edge_gone")
             continue
         if e.settle_ts - time.time() < STAND_DOWN_FINAL_S:
             _mark_edge(con, e, "final_window")
@@ -511,7 +510,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
                     (time.time(), "?", coid, e.ticker, e.side, "buy", n, ask,
                      e.fair, "sent"))
         db.record_order_evidence(
-            con, client_order_id=coid, ticker=e.ticker, asset=e.asset,
+            con, client_order_id=coid, ticker=e.ticker, city=e.city,
             settle_ts=e.settle_ts, event_profit_model=metrics.model_profit_p,
             event_profit_market=metrics.market_profit_p,
             expected_pnl=metrics.model_ev, worst_loss=metrics.worst_loss,
@@ -569,7 +568,7 @@ def execute(kalshi, con, edges: list[Edge], deribit_age_s: float,
         if actual_metrics is not None:
             db.record_order_evidence(
                 con, client_order_id=coid, order_id=oid, ticker=e.ticker,
-                asset=e.asset, settle_ts=e.settle_ts,
+                city=e.city, settle_ts=e.settle_ts,
                 event_profit_model=actual_metrics.model_profit_p,
                 event_profit_market=actual_metrics.market_profit_p,
                 expected_pnl=actual_metrics.model_ev,

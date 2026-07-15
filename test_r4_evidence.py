@@ -12,9 +12,9 @@ def _db(tmp_path, monkeypatch):
     return db.connect()
 
 
-def _surface(ts, version="r4"):
+def _surface(ts, version="w1"):
     return {
-        "ts": ts, "event": "LADDER", "asset": "BTC", "settle_ts": ts + 3600,
+        "ts": ts, "event": "LADDER", "city": "BTC", "settle_ts": ts + 3600,
         "model_version": version, "model_center": 100, "model_iqr": 20,
         "market_center": 100, "market_iqr": 18, "width_ratio": 20 / 18,
         "contracts": [
@@ -29,12 +29,12 @@ def _surface(ts, version="r4"):
 def test_calibration_is_event_balanced_and_version_isolated(tmp_path, monkeypatch):
     con = _db(tmp_path, monkeypatch)
     ts = 1_800_000_000.0
-    db.record_surface(con, _surface(ts, "r4"))
+    db.record_surface(con, _surface(ts, "w1"))
     db.record_surface(con, _surface(ts + 1, "r3"))
     db.record_outcome(con, "BTC", ts + 3600, 100.0, ts + 3700)
     con.commit()
 
-    evidence = db.strategy_calibration(con, "r4")
+    evidence = db.strategy_calibration(con, "w1")
     assert evidence["contracts"] == 2
     assert evidence["event_risk_keys"] == 1
     assert evidence["settlement_timestamps"] == 1
@@ -42,31 +42,6 @@ def test_calibration_is_event_balanced_and_version_isolated(tmp_path, monkeypatc
     assert evidence["model_brier"] == pytest.approx((.25**2 + .25**2) / 2)
     assert evidence["market_brier"] == pytest.approx((.30**2 + .30**2) / 2)
 
-
-def test_surface_merges_cosettling_ladder_and_range_into_one_observation(
-        tmp_path, monkeypatch):
-    con = _db(tmp_path, monkeypatch)
-    ts = 1_800_000_000.0
-    ladder = _surface(ts)
-    ladder["event"] = "LADDER"
-    range_surface = _surface(ts)
-    range_surface["event"] = "RANGE"
-    range_surface["contracts"] = [{
-        "ticker": "BUCKET", "strike_type": "between", "floor_strike": 95,
-        "cap_strike": 105, "fair": .50, "market_mid": .48,
-    }]
-    db.record_surface(con, ladder)
-    db.record_surface(con, range_surface)
-    con.commit()
-
-    rows = con.execute(
-        "SELECT event,contracts_json FROM surfaces WHERE model_version='r4'"
-    ).fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == f"BTC:{int(ts + 3600)}"
-    assert {c["ticker"] for c in __import__("json").loads(rows[0][1])["contracts"]} == {
-        "LOW", "HIGH", "BUCKET",
-    }
 
 
 def test_versioned_pnl_uses_exact_entry_fills_not_manual_settlement_aggregate(
@@ -77,7 +52,7 @@ def test_versioned_pnl_uses_exact_entry_fills_not_manual_settlement_aggregate(
     con.execute("INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (now, "o1", "c1", "T", "yes", "buy", 1, .40, .70, "filled"))
     db.record_order_evidence(
-        con, client_order_id="c1", order_id="o1", ticker="T", asset="BTC",
+        con, client_order_id="c1", order_id="o1", ticker="T", city="BTC",
         settle_ts=now + 60, event_profit_model=.7, event_profit_market=.6,
         expected_pnl=.29, worst_loss=.41,
     )

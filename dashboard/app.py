@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 import config
 import db
-from engine import rails
+from engine import rails, weather
 from kalshi.client import KalshiClient
 
 app = FastAPI()
@@ -141,19 +141,21 @@ def state():
     status = _read_status(keep_last=True)  # torn write: retain last good display state
 
     charts = {}
-    for asset, s in config.SERIES.items():
+    for city, cfg in config.CITIES.items():
         row = q(con, """SELECT event, MAX(ts) FROM snapshots
-                        WHERE asset=? AND event LIKE ? AND settle_ts > ?
+                        WHERE city=? AND event LIKE ? AND settle_ts > ?
                         GROUP BY event ORDER BY settle_ts LIMIT 1""",
-                asset, s["ladder"] + "%", now)
+                city, cfg["series"] + "%", now)
         if not row or not row[0][0]:
             continue
         ev, ts = row[0]
-        pts = q(con, """SELECT strike, fair, bid, ask, settle_ts FROM snapshots
-                        WHERE event=? AND ts=? ORDER BY strike""", ev, ts)
-        charts[asset] = {
+        # plot at each leg's lower edge; the open-ended `less` leg has no floor
+        pts = q(con, """SELECT COALESCE(floor_strike, cap_strike), fair, bid, ask,
+                               settle_ts FROM snapshots
+                        WHERE event=? AND ts=? ORDER BY 1""", ev, ts)
+        charts[city] = {
             "event": ev, "as_of": ts, "settle_ts": pts[0][4] if pts else None,
-            "index": (status.get("index") or {}).get(asset),
+            "index": (status.get("forecast_center") or {}).get(city),
             "points": [{"k": p[0], "fair": p[1], "bid": p[2], "ask": p[3]} for p in pts],
         }
 
@@ -165,15 +167,6 @@ def state():
                 p["ticker"])
         pos_fairs[p["ticker"]] = _position_fair(row[0][0] if row else None,
                                                 p["count"])
-    from engine.scanner import threshold_factor
-    cat_file = config.ROOT / "state" / "catalysts.json"
-    cat_windows = []
-    if cat_file.exists():
-        try:
-            cat_windows = [w for w in json.loads(cat_file.read_text()).get("windows", [])
-                           if float(w.get("end_ts", 0)) > now]
-        except (ValueError, TypeError):
-            pass
     pnl_today = db.strategy_pnl(con, now - (now % 86400), now)
     latest_model_start = q(
         con, "SELECT COALESCE(MAX(ts),0) FROM events WHERE kind='start' "
@@ -214,8 +207,7 @@ def state():
         },
         "pnl_today": pnl_today,
         "pos_fairs": pos_fairs,
-        "catalyst": {"factor_now": threshold_factor(now),
-                     "windows": sorted(cat_windows, key=lambda w: w["start_ts"])[:5]},
+        "forecast": {"status": weather.STATUS},
         "edges": [dict(zip(["ts", "ticker", "side", "fair", "price", "edge", "acted"], e))
                   for e in edges],
         "events": [dict(zip(["ts", "kind", "detail"], e)) for e in events],

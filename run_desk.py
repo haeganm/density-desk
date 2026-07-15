@@ -1,4 +1,4 @@
-"""Density Desk main loop: chains -> densities -> scan -> execute -> journal.
+"""Weather Desk main loop: ensembles -> distributions -> scan -> execute -> journal.
 Run: .venv\\Scripts\\python.exe run_desk.py   (or via scheduled task, see ops/install_tasks.py)
 Kill switch: create file KILL in repo root."""
 import datetime as dt
@@ -105,8 +105,8 @@ def sync_portfolio(kalshi, con):
             db.log_event(con, "settle_revision",
                          f"{t}: pnl {prior[0]:.4f} -> {pnl:.4f}")
         meta = con.execute(
-            """SELECT asset,settle_ts FROM contracts WHERE ticker=?
-               UNION ALL SELECT asset,settle_ts FROM snapshots WHERE ticker=?
+            """SELECT city,settle_ts FROM contracts WHERE ticker=?
+               UNION ALL SELECT city,settle_ts FROM snapshots WHERE ticker=?
                ORDER BY settle_ts DESC LIMIT 1""", (t, t)
         ).fetchone()
         if meta:
@@ -118,13 +118,13 @@ def sync_portfolio(kalshi, con):
 
 
 def record_settlements(kalshi, con):
-    """Finalize durable asset/settlement outcomes from any observed contract."""
+    """Finalize durable city/settlement outcomes from any observed contract."""
     pending = [r[0] for r in con.execute(
         """SELECT MIN(c.ticker) FROM contracts c
            WHERE c.settle_ts<=? AND NOT EXISTS (
-             SELECT 1 FROM outcomes o WHERE o.asset=c.asset
+             SELECT 1 FROM outcomes o WHERE o.city=c.city
                AND o.settle_ts=c.settle_ts AND o.expiration_value IS NOT NULL)
-           GROUP BY c.asset,c.settle_ts ORDER BY c.settle_ts DESC""",
+           GROUP BY c.city,c.settle_ts ORDER BY c.settle_ts DESC""",
         (time.time(),))]
     if not pending:
         return
@@ -135,10 +135,10 @@ def record_settlements(kalshi, con):
             continue
         final_ts = _iso_ts(finalized)
         predicted = con.execute(
-            "SELECT fair,settle_ts,asset FROM snapshots WHERE ticker=? ORDER BY ts DESC LIMIT 1",
+            "SELECT fair,settle_ts,city FROM snapshots WHERE ticker=? ORDER BY ts DESC LIMIT 1",
             (m["ticker"],)).fetchone()
         meta = con.execute(
-            "SELECT asset,settle_ts FROM contracts WHERE ticker=?", (m["ticker"],)
+            "SELECT city,settle_ts FROM contracts WHERE ticker=?", (m["ticker"],)
         ).fetchone()
         if not meta:
             continue
@@ -156,7 +156,7 @@ def record_settlements(kalshi, con):
     con.commit()
 
 
-def write_status(edges, actions, chains, err=None, portfolio=None, health=None, con=None):
+def write_status(edges, actions, forecasts, err=None, portfolio=None, health=None, con=None):
     STATE.mkdir(exist_ok=True)
     health = health or {}
     balance = portfolio["cash"] if portfolio else None
@@ -169,7 +169,7 @@ def write_status(edges, actions, chains, err=None, portfolio=None, health=None, 
     (STATE / "status.json").write_text(json.dumps({
         "ts": time.time(),
         "utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
-        "index": {a: c.index_price for a, c in (chains or {}).items()},
+        "forecast_center": {c: f.center for c, f in (forecasts or {}).items()},
         "edges": [vars(e) for e in edges[:10]],
         "actions": actions,
         "error": err,
@@ -187,7 +187,7 @@ def write_status(edges, actions, chains, err=None, portfolio=None, health=None, 
 
 def run_cycle(kalshi, con):
     """Reconcile first; scanning survives sync failure, execution does not."""
-    chains, edges, actions, next_settle = None, [], [], None
+    forecasts, edges, actions, next_settle = None, [], [], None
     portfolio, sync_ts, sync_clock_skew_s = None, None, None
     sync_ok = False
     scan_ok = False
@@ -207,12 +207,12 @@ def run_cycle(kalshi, con):
 
     scan_start = time.time()
     try:
-        chains = scanner.fetch_all_chains()
-        edges, next_settle = scanner.scan(kalshi, chains, con)
+        forecasts = scanner.fetch_all_forecasts()
+        edges, next_settle = scanner.scan(kalshi, forecasts, con)
         scan_ok = True
         if not getattr(kalshi, "can_trade", False) or sync_ok:
-            deribit_age = time.time() - min(c.fetched_ts for c in chains.values())
-            actions = executor.execute(kalshi, con, edges, deribit_age_s=deribit_age,
+            model_age = time.time() - min(f.fetched_ts for f in forecasts.values())
+            actions = executor.execute(kalshi, con, edges, model_age_s=model_age,
                                        kalshi_age_s=time.time() - scan_start,
                                        portfolio=portfolio)
             for action in actions:
@@ -225,10 +225,10 @@ def run_cycle(kalshi, con):
         # runs on scan failure too: an empty edge list cancels every resting
         # quote (we can't price what we can't scan)
         if sync_ok:
-            deribit_age = (time.time() - min(c.fetched_ts for c in chains.values())
-                           if chains else 1e9)
+            model_age = (time.time() - min(f.fetched_ts for f in forecasts.values())
+                         if forecasts else 1e9)
             actions += maker.manage(kalshi, con, edges, portfolio,
-                                    deribit_age_s=deribit_age,
+                                    model_age_s=model_age,
                                     kalshi_age_s=time.time() - scan_start)
     except Exception:
         errors.append("maker:\n" + traceback.format_exc(limit=3))
@@ -244,7 +244,7 @@ def run_cycle(kalshi, con):
     health = {"scan_ok": scan_ok, "portfolio_sync_ok": sync_ok,
               "portfolio_sync_ts": sync_ts,
               "clock_skew_s": sync_clock_skew_s}
-    return chains, edges, actions, err, next_settle, portfolio, health
+    return forecasts, edges, actions, err, next_settle, portfolio, health
 
 
 def main():
@@ -271,8 +271,8 @@ def main():
         if time.time() - last_prune > 6 * 3600:
             db.prune(con)
             last_prune = time.time()
-        chains, edges, actions, err, next_settle, portfolio, health = run_cycle(kalshi, con)
-        write_status(edges, actions, chains, err, portfolio, health, con)
+        forecasts, edges, actions, err, next_settle, portfolio, health = run_cycle(kalshi, con)
+        write_status(edges, actions, forecasts, err, portfolio, health, con)
         print(f"[{dt.datetime.now():%H:%M:%S}] edges={len(edges)} {actions[:2] if actions else ''}"
               + (" ERR" if err else ""))
         final = next_settle and (next_settle - time.time()) < config.FINAL_WINDOW_S

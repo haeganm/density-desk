@@ -91,7 +91,7 @@ def test_still_clears_holds_quote_when_our_own_bid_hid_the_edge(tmp_path, monkey
     con = _desk(tmp_path, monkeypatch)
     from engine.maker import _still_clears
     now = time.time()
-    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO snapshots VALUES(?,?,?,?,?,NULL,?,?,?,?,?)",
                 (now, "T-1", "EV", "BTC", 100.0, now + 3600, 0.40, 0.30, 0.42, 100.0))
     con.commit()
     assert _still_clears(con, "T-1", "yes", 0.30, now) is True    # 0.40-0.30 >= 0.01
