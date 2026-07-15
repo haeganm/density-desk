@@ -132,10 +132,41 @@ def test_strategy_pnl_counts_no_side_entry_fills_journaled_as_sell():
         con.commit()
 
 
+def test_drawdown_auto_disarm():
+    # rescued from test_vol_profile.py during the weather conversion: it tests
+    # rails.drawdown_check and was misfiled, so deleting the crypto vol-profile
+    # module would have silently taken the auto-disarm rail's only test with it.
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="dd-dd-"))
+    armed_before = config.ARMED_FILE
+    config.ARMED_FILE = tmp / "ARMED"
+    con = db.connect()
+    try:
+        config.ARMED_FILE.write_text("10.00")
+        rails.drawdown_check(con, 9.0)                   # above 65% -> fine
+        assert config.ARMED_FILE.exists()
+        try:
+            rails.drawdown_check(con, 6.0)               # below 65% of 10 -> disarm
+            raise AssertionError("drawdown did not halt")
+        except rails.RailsHalt:
+            pass
+        assert not config.ARMED_FILE.exists(), "ARMED file not removed"
+        assert con.execute("SELECT COUNT(*) FROM events WHERE kind='auto_disarm'"
+                           ).fetchone()[0] == 1
+        # empty ARMED file gets backfilled with current equity
+        config.ARMED_FILE.write_text("")
+        rails.drawdown_check(con, 12.34)
+        assert config.ARMED_FILE.read_text() == "12.34"
+    finally:
+        config.ARMED_FILE = armed_before
+        con.execute("DELETE FROM events")
+        con.commit()
+
+
 if __name__ == "__main__":
     for fn in [test_kill_file_halts, test_per_trade_cap, test_exposure_cap,
                test_daily_loss_halts_and_writes_halt_file,
                test_epoch_bump_does_not_forgive_todays_desk_losses,
-               test_strategy_pnl_counts_no_side_entry_fills_journaled_as_sell]:
+               test_strategy_pnl_counts_no_side_entry_fills_journaled_as_sell,
+               test_drawdown_auto_disarm]:
         fn()
         print(f"PASS {fn.__name__}")
