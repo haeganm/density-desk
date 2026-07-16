@@ -1,0 +1,5 @@
+h= 1m: beta train +0.061 / TEST +0.019 | gamma -0.0000 | R2 -0.057 | capture@|gap|>3c +0.29c (n=16550)
+h= 5m: beta train +0.082 / TEST +0.024 | gamma +0.0001 | R2 -0.025 | capture@|gap|>3c +0.43c (n=16108)
+h=15m: beta train +0.100 / TEST +0.035 | gamma +0.0001 | R2 -0.009 | capture@|gap|>3c +0.69c (n=15530)
+bar=0.0425
+PASS=False
