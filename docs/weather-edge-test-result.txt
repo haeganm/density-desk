@@ -1,0 +1,56 @@
+==============================================================================
+KALSHI WEATHER — PASSIVE-SELL EDGE TEST
+rows: 2412 legs | 68 distinct dates | 7 series
+LIMITS: 68-day rolling window, ALL SUMMER (2026-05-09..07-15), no winter ever.
+        Cities correlate on synoptic regimes -> bootstrap clusters BY DATE.
+        Fill model UNDERSTATES adverse selection (no book impact, no pick-off).
+==============================================================================
+
+A. CALIBRATION AT D-1 (does the model beat the mid?)
+   model Brier 0.1477 vs market-mid Brier 0.1215  -> MARKET BETTER by -21.5%
+
+B. INDISCRIMINATE PASSIVE SELL (no model; the baseline to beat)
+   assuming fill              n= 2412 mean +0.0058/contract total +13.88
+   conditioned on fill model  n= 2327 mean +0.0032/contract total +7.56
+
+C. MODEL-SELECTED PASSIVE SELL (what the desk would do)
+   assuming fill              n=  891 mean +0.0099/contract total +8.84
+   conditioned on fill model  n=  882 mean +0.0071/contract total +6.26
+
+D. BY ASK BUCKET (is the edge one cell?)  [model-selected, filled]
+   bucket        n   mean ask  realized  P&L/contract    total
+   [0.10,0.20)    50   0.1748    0.1200   +0.0448      +2.24
+   [0.20,0.40)   401   0.3083    0.2943   +0.0040      +1.62
+   [0.40,0.60)   375   0.4778    0.4560   +0.0118      +4.41
+   [0.60,1.01)    56   0.6527    0.6786   -0.0359      -2.01
+
+   LEAVE-ONE-BUCKET-OUT (a CI that survives on one cell is not evidence):
+     drop [0.10,0.20) -> n=  832 mean +0.0048/contract
+     drop [0.20,0.40) -> n=  481 mean +0.0096/contract
+     drop [0.40,0.60) -> n=  507 mean +0.0036/contract
+     drop [0.60,1.01) -> n=  826 mean +0.0100/contract
+
+==============================================================================
+E. VERDICT (rule fixed BEFORE looking: EV > +1.5c AND 95% CI clears zero)
+   model-selected, fill-conditioned: n=882 over 68 dates
+   mean EV = +0.0071/contract (+0.71c)
+   95% CI (clustered by date) = [-0.0134, +0.0286]
+
+   >>> DO NOT ARM: EV +0.71c does not clear the +1.50c bar; 95% CI includes zero.
+   >>> The rule was pre-committed. Do not re-tune it now. Report and stop.
+==============================================================================
+--- STALENESS CONTROL (added 2026-07-16) ---
+Concern: our archived forecast is the D-1 00Z run, but the D-1 quote (24h before
+close) is 1am ET on the event day, by which point the market has the fresher 00Z
+run. Were we handicapping our own model by a day of staleness?
+
+Answer: partly, but it does not change the sign.
+  39h before close (= market OPEN, contemporaneous with our forecast, the fairest
+                     comparison available to us):  model 0.1348 vs market 0.1181
+                                                   -> MARKET BETTER BY 14.1%
+  30h ->  market better by 18.5%
+  24h ->  market better by 21.5%
+  12h ->  market better by 54.7%   (market updates; we do not)
+
+The market beats our model at EVERY horizon, including the one most favourable to
+us. The premise is not unproven -- it is falsified.
