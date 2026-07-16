@@ -38,18 +38,22 @@ _MONTHS = {m: i + 1 for i, m in enumerate(
 
 @dataclass
 class Forecast:
-    """One city's pooled ensemble, keyed by local date. `fetched_ts` feeds the
-    staleness rail exactly as the Deribit chain's did."""
+    """One city's forecast bundle, keyed by local date.
+
+    `deterministic` is the CENTER we trade on (the estimator the calibration was
+    fitted on); `pooled` is the ensemble, used only for the spread signal.
+    `fetched_ts` feeds the staleness rail exactly as the Deribit chain's did.
+    """
+    deterministic: dict[str, float] = field(default_factory=dict)
     pooled: dict[str, list[float]] = field(default_factory=dict)
     fetched_ts: float = 0.0
 
     @property
     def center(self) -> float | None:
-        """Raw pooled mean for the nearest date -- display only (uncalibrated)."""
-        if not self.pooled:
+        """Deterministic high for the nearest date -- display only (uncalibrated)."""
+        if not self.deterministic:
             return None
-        members = self.pooled[min(self.pooled)]
-        return sum(members) / len(members) if members else None
+        return self.deterministic[min(self.deterministic)]
 
 
 @dataclass
@@ -282,7 +286,7 @@ def scan(kalshi, forecasts: dict[str, Forecast], con=None) -> tuple[list[Edge], 
 
     for city, cfg in config.CITIES.items():
         fc = forecasts.get(city)
-        if fc is None or not fc.pooled or city not in calib:
+        if fc is None or not fc.deterministic or city not in calib:
             if con:
                 db.log_event(con, "forecast_skip",
                              f"{city}: no usable forecast/calibration")
@@ -313,8 +317,9 @@ def scan(kalshi, forecasts: dict[str, Forecast], con=None) -> tuple[list[Edge], 
             if lead < 1:
                 continue
             try:
-                d = weather.distribution(city, local.isoformat(), fc.pooled, calib,
-                                         fc.fetched_ts, lead_days=lead)
+                d = weather.distribution(city, local.isoformat(), fc.deterministic,
+                                         calib, fc.fetched_ts, lead_days=lead,
+                                         pooled=fc.pooled)
             except WeatherError as e:
                 if con:
                     db.record_surface(con, {
@@ -427,8 +432,18 @@ def scan(kalshi, forecasts: dict[str, Forecast], con=None) -> tuple[list[Edge], 
 
 
 def fetch_all_forecasts() -> dict[str, Forecast]:
+    """Deterministic center (required) + ensemble spread (best-effort).
+
+    A dead ensemble must not stop the desk: without it we simply do not widen,
+    which is the status quo, not a false confidence.
+    """
     out: dict[str, Forecast] = {}
     for city, cfg in config.CITIES.items():
-        pooled, ts = weather.fetch_members(city, cfg)
-        out[city] = Forecast(pooled=pooled, fetched_ts=ts)
+        deterministic = weather.fetch_deterministic(cfg)
+        try:
+            pooled, _ = weather.fetch_members(city, cfg)
+        except WeatherError:
+            pooled = {}
+        out[city] = Forecast(deterministic=deterministic, pooled=pooled,
+                             fetched_ts=time.time())
     return out

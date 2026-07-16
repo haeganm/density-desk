@@ -71,7 +71,7 @@ def test_liquid_quote_never_reads_liquidity_dollars():
 
 
 def test_scenarios_are_one_per_leg_and_fail_closed_on_a_broken_partition():
-    d = TempDistribution(_members(92.0), bias=0.0, sd=3.4, fetched_ts=0.0)
+    d = TempDistribution.from_members(_members(92.0), bias=0.0, sd=3.4, fetched_ts=0.0)
     markets = _quoted([0.22, 0.35, 0.24, 0.13, 0.04, 0.02])
     sc = scanner._scenarios(d, markets)
     assert sc is not None and len(sc) == len(PARTITION)
@@ -93,11 +93,11 @@ def test_surface_verdict_compares_centers_in_degrees_not_bps():
     # The crypto relative-bps test would be 0.09F at 90F -- absurd for weather.
     assert config.BASIS_ALARM_F == 3.0
     markets = _quoted([0.22, 0.35, 0.24, 0.13, 0.04, 0.02])
-    agree = TempDistribution(_members(89.8), bias=0.0, sd=3.4, fetched_ts=0.0)
+    agree = TempDistribution.from_members(_members(89.8), bias=0.0, sd=3.4, fetched_ts=0.0)
     bad, detail, sc = scanner._surface_verdict(agree, markets)
     assert not bad and sc, detail
     # a model 10F above the market's center is a blown model, not an edge
-    wild = TempDistribution(_members(101.0), bias=0.0, sd=3.4, fetched_ts=0.0)
+    wild = TempDistribution.from_members(_members(101.0), bias=0.0, sd=3.4, fetched_ts=0.0)
     bad, detail, sc = scanner._surface_verdict(wild, markets)
     assert bad and "center" in detail and sc == ()
 

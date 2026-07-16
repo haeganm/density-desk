@@ -40,7 +40,7 @@ def test_bias_is_seasonal_not_annual():
 
 
 def test_survival_is_reported_integer_space_with_continuity_correction():
-    d = TempDistribution(_members(90.0), bias=0.0, sd=3.0, fetched_ts=0.0)
+    d = TempDistribution.from_members(_members(90.0), bias=0.0, sd=3.0, fetched_ts=0.0)
     # P(reported > 90) = P(latent > 90.5), NOT P(latent > 90)
     assert d.survival(90) == pytest.approx(1 - 0.5 * (1 + math.erf(0.5 / 3.0 / math.sqrt(2))))
     assert d.survival(200) < 1e-6 and d.survival(-50) > 1 - 1e-6
@@ -55,8 +55,8 @@ def test_bias_shifts_the_center_by_a_full_bucket():
     # Summer bias is ~+2.4F, wider than a whole 2F bucket, so correcting it is not
     # a refinement -- it relocates the distribution. Raw GFS said 99.0F for NY on
     # 2026-07-15; corrected, 96.6F.
-    hot = TempDistribution(_members(99.0), bias=2.39, sd=3.0, fetched_ts=0.0)
-    raw = TempDistribution(_members(99.0), bias=0.0, sd=3.0, fetched_ts=0.0)
+    hot = TempDistribution.from_members(_members(99.0), bias=2.39, sd=3.0, fetched_ts=0.0)
+    raw = TempDistribution.from_members(_members(99.0), bias=0.0, sd=3.0, fetched_ts=0.0)
     assert hot.median() == pytest.approx(96.61)
     assert raw.median() == pytest.approx(99.0)
     # and that shift swings P(>=97) by ~28 points -- the difference between
@@ -67,23 +67,53 @@ def test_bias_shifts_the_center_by_a_full_bucket():
 
 
 def test_ensemble_may_widen_but_never_narrow():
-    tight = TempDistribution(_members(90.0, sd=0.4), bias=0.0, sd=3.0,
+    tight = TempDistribution.from_members(_members(90.0, sd=0.4), bias=0.0, sd=3.0,
                              fetched_ts=0.0, typical_spread=1.6)
     assert tight.sd == pytest.approx(3.0)      # narrow spread buys NO confidence
     assert tight.spread_widen == 1.0
-    wide = TempDistribution(_members(90.0, sd=4.8), bias=0.0, sd=3.0,
+    wide = TempDistribution.from_members(_members(90.0, sd=4.8), bias=0.0, sd=3.0,
                             fetched_ts=0.0, typical_spread=1.6)
     assert wide.sd > 3.0                       # a genuinely uncertain day widens us
     assert wide.spread_widen > 1.0
 
 
+def test_from_point_is_the_traded_center_and_matches_from_members():
+    # PRODUCTION CENTERS ON from_point. The calibration was fitted against the
+    # DETERMINISTIC forecast (previous-runs archives no ensemble), so centering on
+    # the pooled ensemble mean would wear a bias correction never measured for it
+    # — and at ±2.4°F seasonal, a 1°F estimator mismatch is half a bucket.
+    # from_point is also the only center the backtest can reconstruct, so the
+    # backtest validates exactly what we trade.
+    point = TempDistribution.from_point(99.0, bias=2.39, sd=3.0)
+    assert point.median() == pytest.approx(96.61)
+    # identical distribution to from_members when the pooled mean equals the point
+    pooled = TempDistribution.from_members(_members(99.0), bias=2.39, sd=3.0,
+                                           fetched_ts=0.0)
+    assert point.median() == pytest.approx(pooled.median())
+    assert point.sd == pytest.approx(pooled.sd)
+    assert point.survival(96) == pytest.approx(pooled.survival(96))
+    # the ensemble's ONLY job is widening, and it can never narrow us
+    assert weather.pooled_widen(_members(90.0, sd=0.4), 1.6) == 1.0
+    assert weather.pooled_widen(_members(90.0, sd=4.8), 1.6) > 1.0
+    assert weather.pooled_widen([], 1.6) == 1.0            # dead ensemble -> no widen
+    assert weather.pooled_widen(_members(90.0), None) == 1.0
+    widened = TempDistribution.from_point(99.0, bias=2.39, sd=3.0, spread_widen=1.5)
+    assert widened.sd == pytest.approx(4.5) and widened.median() == pytest.approx(96.61)
+
+
 def test_degraded_inputs_fail_closed():
     with pytest.raises(WeatherError):
-        TempDistribution(_members(90.0, n=10), bias=0, sd=3, fetched_ts=0)   # thin pool
+        TempDistribution.from_point(float("nan"), bias=0, sd=3)
     with pytest.raises(WeatherError):
-        TempDistribution(_members(90.0), bias=0, sd=0, fetched_ts=0)         # sd<=0
+        TempDistribution.from_point(90.0, bias=float("nan"), sd=3)
     with pytest.raises(WeatherError):
-        TempDistribution(_members(90.0), bias=float("nan"), sd=3, fetched_ts=0)
+        TempDistribution.from_point(90.0, bias=0, sd=0)
+    with pytest.raises(WeatherError):
+        TempDistribution.from_members(_members(90.0, n=10), bias=0, sd=3, fetched_ts=0)   # thin pool
+    with pytest.raises(WeatherError):
+        TempDistribution.from_members(_members(90.0), bias=0, sd=0, fetched_ts=0)         # sd<=0
+    with pytest.raises(WeatherError):
+        TempDistribution.from_members(_members(90.0), bias=float("nan"), sd=3, fetched_ts=0)
 
 
 # The live KXHIGHNY-26JUL16 partition, verbatim from the API 2026-07-15.
@@ -112,7 +142,7 @@ def test_partition_probabilities_sum_to_exactly_one():
     # so if the model legs do not sum to 1 either our pricing is inconsistent or
     # Kalshi's partition has a gap -- and either way we must not quote.
     for centre in (85.0, 92.3, 99.0):
-        d = TempDistribution(_members(centre), bias=0.0, sd=3.4, fetched_ts=0.0)
+        d = TempDistribution.from_members(_members(centre), bias=0.0, sd=3.4, fetched_ts=0.0)
         total = sum(weather.fair(d, m) for m in PARTITION)
         assert total == pytest.approx(1.0, abs=1e-9), (centre, total)
 
@@ -124,7 +154,7 @@ def test_every_reported_integer_is_won_by_exactly_one_leg():
 
 def test_fair_matches_wins_by_monte_carlo():
     """fair() must be the probability of the event _wins() describes."""
-    d = TempDistribution(_members(92.0), bias=0.0, sd=3.4, fetched_ts=0.0)
+    d = TempDistribution.from_members(_members(92.0), bias=0.0, sd=3.4, fetched_ts=0.0)
     for m in PARTITION:
         # integrate _wins over the reported-integer distribution
         p = sum((d.survival(t - 1) - d.survival(t)) for t in range(60, 130)
