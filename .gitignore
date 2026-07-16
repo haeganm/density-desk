@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 docs/phase0_raw.json
 docs/kalshi-fee-schedule.pdf
+state/backtest_cache.db

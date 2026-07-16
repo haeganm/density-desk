@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DENSITY DESK // ARASAKA MARKET INTELLIGENCE</title>
+<title>WEATHER DESK // ARASAKA MARKET INTELLIGENCE</title>
 <style>
 :root{
   --bg:#0a0a0f; --panel:#101018; --panel2:#14141e; --line:#2a2a38;
@@ -103,7 +103,7 @@ details{margin-top:6px}summary{color:var(--ink3);font-size:9px;letter-spacing:2p
 <div id="tip"></div>
 
 <header>
-  <h1>DENSITY<b>DESK</b></h1>
+  <h1>WEATHER<b>DESK</b></h1>
   <span class="sub">Arasaka Market Intelligence</span>
   <span id="spot" class="mono"></span>
   <span id="clock" class="mono"></span>
@@ -132,17 +132,11 @@ details{margin-top:6px}summary{color:var(--ink3);font-size:9px;letter-spacing:2p
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>BTC — model vs market <span class="hint" id="c-btc-h"></span></h2>
+  <div class="panel"><h2>NYC daily high — model vs market <span class="hint" id="c-nyc-h"></span></h2>
     <div class="legend"><span><i style="background:var(--gold)"></i>Model</span>
       <span><i style="background:var(--red)"></i>Market bid–ask</span></div>
-    <div id="c-btc"></div>
-    <details><summary>full ladder table</summary><div id="tb-btc"></div></details>
-  </div>
-  <div class="panel"><h2>ETH — model vs market <span class="hint" id="c-eth-h"></span></h2>
-    <div class="legend"><span><i style="background:var(--gold)"></i>Model</span>
-      <span><i style="background:var(--red)"></i>Market bid–ask</span></div>
-    <div id="c-eth"></div>
-    <details><summary>full ladder table</summary><div id="tb-eth"></div></details>
+    <div id="c-nyc"></div>
+    <details><summary>full bucket table</summary><div id="tb-nyc"></div></details>
   </div>
   <div class="panel"><h2>Edge feed <span class="hint">latest edge per market · after fees</span></h2>
     <div id="edges" class="scroll"></div></div>
@@ -158,14 +152,17 @@ const $=id=>document.getElementById(id);
 const fmt=(x,d=2)=>x==null?"—":(+x).toFixed(d);
 const money=x=>(x>=0?"+$":"−$")+Math.abs(x).toFixed(2);
 const loc=ts=>new Date(ts*1000).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
-const kfmt=x=>x>=1000?(x/1000).toLocaleString(undefined,{maximumFractionDigits:2})+"k":x.toLocaleString();
+const kfmt=x=>x==null?"—":Math.round(x)+"°";   /* degF, not $-thousands */
 
-/* KXBTCD-26JUL1404-T62749.99 -> "BTC > $62.75k · 4am ET settle" */
+/* KXHIGHNY-26JUL16-B89.5 -> "89–90° · Jul 16"; -T96 -> "≥97° · Jul 16" */
 function label(t){
-  const m=(t||"").match(/^KX(BTC|ETH|WTI)[A-Z]*-\d{2}[A-Z]{3}\d{2}(\d{2})-([TB])([\d.]+)$/);
+  const m=(t||"").match(/^KXHIGH[A-Z]*-\d{2}([A-Z]{3})(\d{2})-([TB])([\d.]+)$/);
   if(!m) return t;
-  const hr=+m[2], ampm=hr===0?"12am":hr<12?hr+"am":hr===12?"12pm":(hr-12)+"pm";
-  return `${m[1]} ${m[3]==="B"?"≈":">"} $${kfmt(+m[4])} · ${ampm} ET`;
+  const day=`${m[1][0]+m[1].slice(1).toLowerCase()} ${+m[2]}`, k=+m[4];
+  /* B89.5 straddles the 89-90 bucket; T-legs are the open ends */
+  const band=m[3]==="B" ? `${Math.floor(k)}–${Math.ceil(k)}°`
+                        : `≥${Math.ceil(k+0.5)}° / ≤${Math.floor(k-0.5)}°`;
+  return `${band} · ${day}`;
 }
 
 const lines=["ESTABLISHING UPLINK ...","CF BENCHMARKS FEED ... OK","DERIBIT SURFACE ... OK",
@@ -196,7 +193,7 @@ function chart(el,tbl,data){
     `<text x="${mL-6}" y="${Y(g)+3}" text-anchor="end">${g*100}%</text>`;
   if(data.index!=null&&data.index>=x0&&data.index<=x1)
     s+=`<line x1="${X(data.index)}" x2="${X(data.index)}" y1="${mT}" y2="${H-mB}" stroke="#5c5a66" stroke-dasharray="3 4"/>`+
-       `<text x="${X(data.index)+4}" y="${mT+9}">spot ${kfmt(data.index)}</text>`;
+       `<text x="${X(data.index)+4}" y="${mT+9}">forecast ${kfmt(data.index)}</text>`;
   for(const p of pts){ if(p.bid==null&&p.ask==null) continue;
     const b=p.bid??0,a=p.ask??1;
     s+=`<line x1="${X(p.k)}" x2="${X(p.k)}" y1="${Y(b)}" y2="${Y(a)}" stroke="#e5133c" stroke-width="2" opacity=".55"/>`;
@@ -211,9 +208,9 @@ function chart(el,tbl,data){
     r.addEventListener("mousemove",ev=>{const p=pts[+r.dataset.i];const t=$("tip");
       t.style.display="block";t.style.left=(ev.clientX+14)+"px";t.style.top=(ev.clientY+10)+"px";
       const gap=p.fair-((p.bid??0)+(p.ask??1))/2;
-      t.innerHTML=`&gt; $${kfmt(p.k)}<br>model ${fmt(p.fair)} · market ${fmt(p.bid)}–${fmt(p.ask)}<br>model−mid ${(gap>=0?"+":"")+fmt(gap)}`;});
+      t.innerHTML=`${kfmt(p.k)}<br>model ${fmt(p.fair)} · market ${fmt(p.bid)}–${fmt(p.ask)}<br>model−mid ${(gap>=0?"+":"")+fmt(gap)}`;});
     r.addEventListener("mouseleave",()=>$("tip").style.display="none");});
-  tbl.innerHTML="<table><tr><th>strike</th><th class=r>model</th><th class=r>bid</th><th class=r>ask</th></tr>"+
+  tbl.innerHTML="<table><tr><th>bucket °F</th><th class=r>model</th><th class=r>bid</th><th class=r>ask</th></tr>"+
     all.map(p=>`<tr><td class="mono">${p.k.toLocaleString()}</td><td class=r>${fmt(p.fair)}</td><td class=r>${fmt(p.bid)}</td><td class=r>${fmt(p.ask)}</td></tr>`).join("")+"</table>";
 }
 
@@ -228,7 +225,7 @@ async function tick(){
   const r=d.rails||{}, st=d.status||{};
   document.body.classList.toggle("halted", r.kill||r.halted);
 
-  $("spot").textContent=Object.entries(st.index||{}).map(([a,v])=>`${a} $${(+v).toLocaleString()}`).join("   ");
+  $("spot").textContent=Object.entries(st.forecast_center||{}).map(([c,v])=>`${c} forecast ${Math.round(v)}°F`).join("   ");
   $("clock").textContent=new Date().toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})
     +" · "+(st.utc||"").slice(11,16)+"Z"+(st.ts?` · data ${Math.round(d.now-st.ts)}s old`:"");
 
@@ -238,12 +235,11 @@ async function tick(){
   $("mode").className=r.kill||r.halted?"neg":(r.can_trade&&r.armed)?"pos":"gold";
   $("chip-kill").style.display=r.kill?"":"none";
   $("chip-halt").style.display=r.halted?"":"none";
-  const cat=d.catalyst||{};
-  const cc=$("chip-cat");
-  if(cat.factor_now>1){cc.style.display="";cc.className="chip warn";
-    cc.textContent=`CATALYST ACTIVE — needs ${cat.factor_now}× edge`;}
-  else if((cat.windows||[]).length){cc.style.display="";cc.className="chip";
-    const w=cat.windows[0];cc.textContent=`next: ${w.label} ${loc(w.start_ts)} (×${w.factor})`;}
+  const fs=(d.forecast||{}).status, cc=$("chip-cat");
+  if(fs&&fs!=="fresh"){cc.style.display="";cc.className="chip "+(fs==="missing"?"warn":"");
+    cc.textContent=fs==="missing"?"NO CALIBRATION — scans blocked (run fit_weather.py)"
+                                 :"calibration stale — refit";}
+  else{cc.style.display="none";}
   else cc.style.display="none";
 
   const ab=$("armbtn");
@@ -279,9 +275,9 @@ async function tick(){
     d.calibration.settlement_timestamps+" settlement times / "+d.calibration.utc_days+" UTC days";
   $("t-edges").textContent=(st.edges||[]).length;
 
-  for(const a of ["btc","eth"]){const c=(d.charts||{})[a.toUpperCase()];
+  for(const a of ["nyc"]){const c=(d.charts||{})[a.toUpperCase()];
     if(c){chart($("c-"+a),$("tb-"+a),c);
-      $("c-"+a+"-h").textContent=`settle ${loc(c.settle_ts)} local`;
+      $("c-"+a+"-h").textContent=`${c.event} · settles ${loc(c.settle_ts)} local`;
       nextSettle=nextSettle?Math.min(nextSettle,c.settle_ts):c.settle_ts;}}
   nextSettle=Object.values(d.charts||{}).reduce((m,c)=>c.settle_ts&&(!m||c.settle_ts<m)?c.settle_ts:m,null);
 
@@ -305,12 +301,13 @@ async function tick(){
       `<td class=r>${f.count}</td><td class=r>${Math.round(f.price*100)}¢</td><td class=r>$${fmt(f.fee)}</td></tr>`).join("")+"</table>"
     :"<div class='empty'>no fills yet</div>";
 
-  const KMAP={error:["k-err","ERROR"],halt:["k-err","HALT"],basis_alarm:["k-warn","BASIS"],
-    density_skip:["k-warn","SKIP"],action:["k-ok","TRADE"],armed:["k-ok","ARMED"],
+  const KMAP={error:["k-err","ERROR"],halt:["k-err","HALT"],surface_alarm:["k-warn","BASIS"],
+    forecast_skip:["k-warn","SKIP"],action:["k-ok","TRADE"],armed:["k-ok","ARMED"],
     disarmed:["k-warn","DISARM"],auto_disarm:["k-err","DRAWDOWN"],
     order_reject:["k-warn","REJECT"],edge_filtered:["k-info","FILTER"],
-    vol_profile_missing:["k-warn","SEASON"],catalyst_sweep:["k-info","SWEEP"],
-    catalyst_sweep_fail:["k-err","SWEEP"],start:["k-info","BOOT"]};
+    weather_calib_missing:["k-err","CALIB"],weather_calib_stale:["k-warn","CALIB"],
+    surface_alarm:["k-warn","SURFACE"],maker_cancel:["k-info","CANCEL"],
+    settle_revision:["k-info","REVISE"],start:["k-info","BOOT"]};
   /* equity sparkline */
   const eq=d.equity||[];
   if(eq.length>1){

@@ -49,11 +49,58 @@ from engine.weather import MAX_SD_F, MIN_SD_F  # noqa: E402
 PREV_RUNS = "https://previous-runs-api.open-meteo.com/v1/forecast"
 IEM = "https://mesonet.agron.iastate.edu/cgi-bin/request/daily.py"
 
-# One city, done properly (operator decision 2026-07-15). Central Park = KNYC,
-# the station named in the KXHIGHNY settlement rule.
+# THE STATION TABLE — one source of truth (the backtest imports this).
+#
+# We TRADE NYC only (config.CITIES). The rest exist so the backtest can pool cities
+# for statistical power; each still needs its own fitted bias, because the
+# grid-vs-station bias is larger than a whole 2°F Kalshi bucket.
+#
+# Stations verified 2026-07-15 from `GET /series/{t}` -> settlement_sources[0].url
+# (the NWS CLI code), and validated 476/476 EXACT against Kalshi's own
+# expiration_value. NEVER take the station from the rules prose — the newer KXHIGHT*
+# family names no station in its text. Wrong station = silent ruin: Central Park->LGA
+# is −1.85°F and ≥2°F off on 57% of days.
 CITIES = {
-    "NYC": {"series": "KXHIGHNY", "lat": 40.7794, "lon": -73.9692,
-            "tz": "America/New_York", "iem_network": "NY_ASOS", "iem_station": "NYC"},
+    "NYC":  {"series": "KXHIGHNY", "lat": 40.77900, "lon": -73.96925,
+             "tz": "America/New_York", "iem_network": "NY_ASOS", "iem_station": "NYC"},
+    "CHI":  {"series": "KXHIGHCHI", "lat": 41.78597, "lon": -87.75242,   # Midway, NOT O'Hare
+             "tz": "America/Chicago", "iem_network": "IL_ASOS", "iem_station": "MDW"},
+    "MIA":  {"series": "KXHIGHMIA", "lat": 25.78805, "lon": -80.31693,
+             "tz": "America/New_York", "iem_network": "FL_ASOS", "iem_station": "MIA"},
+    "AUS":  {"series": "KXHIGHAUS", "lat": 30.18304, "lon": -97.67987,
+             "tz": "America/Chicago", "iem_network": "TX_ASOS", "iem_station": "AUS"},
+    "DEN":  {"series": "KXHIGHDEN", "lat": 39.83280, "lon": -104.65750,
+             "tz": "America/Denver", "iem_network": "CO_ASOS", "iem_station": "DEN"},
+    "LAX":  {"series": "KXHIGHLAX", "lat": 33.93816, "lon": -118.38653,
+             "tz": "America/Los_Angeles", "iem_network": "CA_ASOS", "iem_station": "LAX"},
+    "PHIL": {"series": "KXHIGHPHIL", "lat": 39.87335, "lon": -75.22663,
+             "tz": "America/New_York", "iem_network": "PA_ASOS", "iem_station": "PHL"},
+    "BOS":  {"series": "KXHIGHTBOS", "lat": 42.36057, "lon": -71.00975,
+             "tz": "America/New_York", "iem_network": "MA_ASOS", "iem_station": "BOS"},
+    "DC":   {"series": "KXHIGHTDC", "lat": 38.84832, "lon": -77.03427,   # DCA, NOT IAD
+             "tz": "America/New_York", "iem_network": "VA_ASOS", "iem_station": "DCA"},
+    "ATL":  {"series": "KXHIGHTATL", "lat": 33.63001, "lon": -84.44230,
+             "tz": "America/New_York", "iem_network": "GA_ASOS", "iem_station": "ATL"},
+    "DAL":  {"series": "KXHIGHTDAL", "lat": 32.89746, "lon": -97.02096,  # DFW, NOT Love
+             "tz": "America/Chicago", "iem_network": "TX_ASOS", "iem_station": "DFW"},
+    "HOU":  {"series": "KXHIGHTHOU", "lat": 29.63798, "lon": -95.28216,  # Hobby, NOT IAH
+             "tz": "America/Chicago", "iem_network": "TX_ASOS", "iem_station": "HOU"},
+    "SATX": {"series": "KXHIGHTSATX", "lat": 29.54417, "lon": -98.48417,
+             "tz": "America/Chicago", "iem_network": "TX_ASOS", "iem_station": "SAT"},
+    "OKC":  {"series": "KXHIGHTOKC", "lat": 35.38889, "lon": -97.60056,
+             "tz": "America/Chicago", "iem_network": "OK_ASOS", "iem_station": "OKC"},
+    "NOLA": {"series": "KXHIGHTNOLA", "lat": 29.99278, "lon": -90.25139,
+             "tz": "America/Chicago", "iem_network": "LA_ASOS", "iem_station": "MSY"},
+    "MIN":  {"series": "KXHIGHTMIN", "lat": 44.88306, "lon": -93.22889,
+             "tz": "America/Chicago", "iem_network": "MN_ASOS", "iem_station": "MSP"},
+    "PHX":  {"series": "KXHIGHTPHX", "lat": 33.42778, "lon": -112.00361,
+             "tz": "America/Phoenix", "iem_network": "AZ_ASOS", "iem_station": "PHX"},
+    "LV":   {"series": "KXHIGHTLV", "lat": 36.07194, "lon": -115.16333,
+             "tz": "America/Los_Angeles", "iem_network": "NV_ASOS", "iem_station": "LAS"},
+    "SFO":  {"series": "KXHIGHTSFO", "lat": 37.61961, "lon": -122.36558,
+             "tz": "America/Los_Angeles", "iem_network": "CA_ASOS", "iem_station": "SFO"},
+    "SEA":  {"series": "KXHIGHTSEA", "lat": 47.44469, "lon": -122.31362,
+             "tz": "America/Los_Angeles", "iem_network": "WA_ASOS", "iem_station": "SEA"},
 }
 LEADS = (1, 2, 3)          # forecast made D-1, D-2, D-3
 SEASON_WINDOW_D = 30       # +/- days around each month centre, pooled across years
@@ -210,16 +257,46 @@ def validate(city: str, cfg: dict, calib: dict, years: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--years", type=int, default=3)
+    ap.add_argument("--cities", default="NYC",
+                    help="comma-separated, or 'all' to fit every city (backtest pooling)")
+    ap.add_argument("--leads", default="1,2,3")
     args = ap.parse_args()
-    out = {"computed_at": time.time(), "years": args.years, "cities": {}}
-    for city, cfg in CITIES.items():
-        calib = fit_city(city, cfg, args.years)
-        out["cities"][city] = calib
-        validate(city, cfg, calib, args.years)
+    global LEADS
+    LEADS = tuple(int(x) for x in args.leads.split(","))
+    wanted = (list(CITIES) if args.cities == "all"
+              else [c.strip() for c in args.cities.split(",")])
+
     path = config.ROOT / "state" / "weather_calib.json"
+    # merge, never clobber: fitting the backtest's pool must not drop NYC's
+    # production leads (and vice versa)
+    try:
+        out = json.loads(path.read_text())
+        out.setdefault("cities", {})
+    except (OSError, ValueError):
+        out = {"cities": {}}
+    out["computed_at"] = time.time()
+    out["years"] = args.years
+
+    for city in wanted:
+        cfg = CITIES.get(city)
+        if not cfg:
+            print(f"[{city}] unknown -- skipped")
+            continue
+        try:
+            calib = fit_city(city, cfg, args.years)
+        except SystemExit as exc:
+            print(f"[{city}] FAILED: {exc}")
+            continue
+        prior = out["cities"].get(city, {})
+        prior_leads = (prior.get("by_lead") or {})
+        prior_leads.update(calib["by_lead"])
+        calib["by_lead"] = prior_leads
+        out["cities"][city] = calib
+        if city == "NYC":
+            validate(city, cfg, calib, args.years)
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(out, indent=1))
-    print(f"\nwrote {path}")
+    print(f"\nwrote {path} ({len(out['cities'])} cities)")
 
 
 if __name__ == "__main__":
