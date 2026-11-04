@@ -1,52 +1,64 @@
 # Density Desk
 
-Risk-controlled Kalshi BTC/ETH settle desk. Deribit's Breeden-Litzenberger density
-is treated as a risk-neutral benchmark, then checked against Kalshi's center and
-width before any event-level position is considered.
+An autonomous Kalshi trading desk that tested three edge hypotheses against real
+markets with real (small) money and pre-committed gates. All three failed.
+The desk was shut down on 2026-07-16 by its own measurements and is kept here
+as the record of what was tested and why it died.
 
-## Run
+Total realized trading P&L across all strategies: about -$6. Two of the three
+strategies never traded a cent, because the gate caught them first.
+
+| # | Thesis | Data | Verdict |
+|---|--------|------|---------|
+| 1 | Price Kalshi BTC/ETH binaries off Deribit's options-implied density | free, public | +3.0% Brier vs market mid, 95% CI [-0.0012, +0.0101], includes zero. Realized -$0.048/contract, about exactly spread plus fees. Structural: BTC ticks in ms, the desk quoted every 30 to 120 s. |
+| 2 | Price Kalshi daily-high weather off calibrated NOAA ensembles | free, public | Market beats the model by 14.1% Brier at market open, 54.7% near close. Gate: EV +0.71 cents vs a +1.5 cent bar, CI includes zero. Never armed. |
+| 3 | Price Kalshi S&P range off the SPX options and SPY tape via Unusual Whales | paid | Beta > 0 out of sample, so Kalshi's market maker is measurably slow, but the capture (0.29 to 0.69 cents) is about 6x below the cost bar (4.25 cents). Retired before any build. |
+
+The result: Kalshi is priced efficiently to within less than one tick across
+every venue reachable with retail data, free or paid. The one real inefficiency
+found (index market-maker lag) is uncollectable at retail costs.
+
+Full closing note: [`docs/SHUTDOWN.md`](docs/SHUTDOWN.md). Evidence:
+[`docs/weather-edge-test-result.txt`](docs/weather-edge-test-result.txt),
+[`docs/gate1-index-result.txt`](docs/gate1-index-result.txt),
+[`docs/market-structure.md`](docs/market-structure.md) (verified Kalshi API
+facts), and the git log, whose commit messages are the project journal.
+
+## What was learned
+
+1. Pre-commit the gate before looking at the result. Three times this turned an
+   open-ended money sink into a cheap, definitive answer.
+2. Never trust a P&L or edge number until the cash moves. A netting bug booked
+   two winning trades as -$4.04 and tripped a halt while the balance never moved.
+3. Mids are not tradable. All-contract Brier is not edge. Unconditional
+   calibration is not fill-conditioned calibration.
+4. A rail an LLM can override is not a rail, and a rail scoped to a strategy
+   epoch forgives losses. The floor must be account level.
+
+## What is in here
+
+`engine/` density math, scanner, maker quoting, executor and risk rails.
+`kalshi/` signed REST client (V2 orders). `dashboard/` FastAPI dashboard with
+an ARM/DISARM toggle. `ops/` operator brief, review and Windows scheduled
+tasks. `scripts/` the edge tests and the backtests that produced the verdicts
+above. `docs/` the verified market facts and the closing note.
+
+Risk controls that stayed on for the whole life of the desk: $2 per order,
+$10 per event, $12 total open exposure, a $5 daily realized-loss halt, a 65%
+drawdown auto-disarm, a file-based kill switch, and arming only ever by a human
+click on the dashboard.
+
+## Run the tests
 
 ```
-.venv\Scripts\python.exe run_desk.py                      # trading loop (scan-only until keys exist)
-.venv\Scripts\python.exe -m uvicorn dashboard.app:app --port 8777   # dashboard -> http://127.0.0.1:8777
-.venv\Scripts\python.exe test_density.py && .venv\Scripts\python.exe test_rails.py
-.venv\Scripts\python.exe ops\install_tasks.py --yes       # schtasks: desk watchdog, dashboard, operator
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\python.exe -m pytest        # 112 tests, offline
 ```
 
-## Go live
+The desk itself needs Kalshi API keys in `secrets/` (gitignored) and a funded
+account. It is not recommended: see the table above.
 
-1. Kalshi account funded. Kelly sizing reads live available cash every cycle;
-   deposits are raw account funding, never counted as strategy profit.
-2. Account settings -> API keys -> create. Save private key as `secrets\kalshi.pem`,
-   key id as the only line of `secrets\kalshi_key_id.txt`.
-3. The desk is out of SHAKEOUT after verified live fills. Hard rails remain $2 per
-   ticker/order, $10 per asset+settlement event, and $12 total open exposure.
-   R4 also requires at least 0.55 modeled and market-implied probability that the
-   complete co-settling position finishes profitable, positive EV/log growth under
-   both distributions, and ranks candidates by that hit-rate objective before edge.
+## License
 
-## Controls
-
-- **Kill switch**: create file `KILL` in repo root (delete to resume). Disarm/kill/
-  halt also cancels all resting maker quotes on the next cycle.
-- Maker quoting (`engine/maker.py`): post-only quotes inside the spread for edges
-  too small to cross with; MAKER_ENABLED/MAKER_MAX_RESTING in config.
-- Daily realized loss limit $5 -> auto-halt until next UTC day (`state/HALT_UNTIL`).
-- Account-equity charts include deposits; strategy progress is measured only from
-  strategy-scoped settlement P&L. No forecast or audit guarantees profit.
-- Catalyst windows in `state/catalysts.json` block settlements inside a window and
-  widen thresholds for windows crossed during the holding period. Auto-filled
-  nightly at 21:30 by `ops/gpt_sweep.py` (drives ChatGPT in a dedicated Chrome
-  profile). One-time setup: `.venv\Scripts\python.exe ops\gpt_sweep.py --login`,
-  sign into chatgpt.com, close the window. A failed refresh preserves the prior
-  calendar, but an invalid/missing calendar or one older than 48 hours blocks orders.
-  See `state/gpt_sweep.log`; manual paste via `docs/gpt-catalyst-prompt.md` still works.
-- Operator brief: `state/brief.md`; Claude CLI verdicts append to `state/journal.md`.
-- `scripts/profit_forecast.py` reports only exact-version, event-balanced evidence;
-  it does not synthesize a daily or weekly profit probability.
-
-## Layout
-
-`engine/` density math + scanner + executor + rails · `kalshi/` signed REST client ·
-`dashboard/` FastAPI + Arasaka UI · `ops/` brief, operator review, schtasks ·
-`docs/market-structure.md` verified market facts · `desk.db` SQLite journal.
+MIT.
