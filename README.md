@@ -52,7 +52,7 @@ click on the dashboard.
 
 ```
 py -3.12 -m venv .venv
-.venv\Scripts\pip install -e .
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python.exe -m pytest        # 112 tests, offline
 ```
 
