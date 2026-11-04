@@ -1,5 +1,7 @@
 # Density Desk
 
+[![CI](https://github.com/haeganm/density-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/haeganm/density-desk/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An autonomous Kalshi trading desk that tested three edge hypotheses against real
 markets with real (small) money and pre-committed gates. All three failed.
 The desk was shut down on 2026-07-16 by its own measurements and is kept here
